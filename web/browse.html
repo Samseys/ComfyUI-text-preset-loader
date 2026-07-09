@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
+<title>Preset Loader — Edit</title>
+<style>
+  :root{
+    --accent:#4a90d9; --name:#e8c547; --surface:#1c1c24; --bg:#13131a;
+    --text:#d0cde8; --muted:#6a6880; --line:#2e2e3c; --ok:#5fbf6f; --del:#cc4444;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:14px;
+    padding:12px; -webkit-text-size-adjust:100%;
+  }
+  h1{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);
+     margin:2px 0 10px;display:flex;align-items:center;gap:8px;}
+  h1 .bar{display:block;width:3px;height:15px;background:var(--accent);border-radius:2px;}
+  .hint{color:var(--muted);font-size:11px;margin:0 2px 12px;line-height:1.5;}
+  input.field, textarea.field{
+    width:100%; background:var(--bg); border:1px solid var(--line);
+    border-radius:6px; padding:10px 11px; color:var(--text);
+    font-family:inherit; font-size:13px; outline:none;
+  }
+  input.field:focus, textarea.field:focus{border-color:var(--accent);}
+  textarea.field{resize:vertical; min-height:160px; line-height:1.5; white-space:pre-wrap;}
+  #search{
+    width:100%; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; padding:11px 12px; color:var(--text);
+    font-family:inherit; font-size:14px; outline:none; margin:0 0 12px;
+  }
+  #search:focus{border-color:var(--accent);}
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:11px 12px; margin-bottom:10px;
+  }
+  .card.dirty{border-color:var(--accent);}
+  .key{font-size:11px;color:var(--muted);word-break:break-all;margin-bottom:8px;}
+  .key .leaf{color:var(--name);}
+  .row{display:flex;gap:8px;margin-top:9px;}
+  button.btn{
+    flex:1;padding:11px;border-radius:7px;border:1px solid var(--line);
+    background:transparent;color:var(--text);font-family:inherit;
+    font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
+    cursor:pointer;-webkit-tap-highlight-color:transparent;
+  }
+  button.btn:active{filter:brightness(1.35);}
+  button.btn.copy{border-color:var(--accent);color:var(--accent);background:rgba(74,144,217,0.15);}
+  button.btn.save{border-color:var(--muted);color:var(--muted);}
+  .card.dirty button.btn.save{border-color:var(--accent);color:#fff;background:rgba(74,144,217,0.3);}
+  button.btn.del{border-color:var(--del);color:var(--del);background:rgba(204,68,68,0.12);}
+  button.btn.create{border-color:var(--accent);color:#fff;background:rgba(74,144,217,0.3);}
+  button.btn.okflash{border-color:var(--ok);color:var(--ok);background:rgba(95,191,111,0.2);}
+  #newForm{display:none;background:var(--surface);border:1px solid var(--line);
+    border-radius:8px;padding:12px;margin-bottom:12px;}
+  #newForm .lbl{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin:0 0 5px;}
+  #newForm .gap{height:9px;}
+  .empty{color:var(--muted);font-size:12px;padding:20px 4px;text-align:center;}
+</style>
+</head>
+<body>
+  <h1><span class="bar"></span>Preset Loader — Edit</h1>
+  <div class="hint">Edit a preset's text and tap <b>Save</b> — it is written to presets.json on the server. <b>Copy</b> puts the text on your clipboard to paste into the node. Use <b>/</b> in a name to nest groups.</div>
+
+  <button id="newBtn" class="btn create" style="width:100%;margin-bottom:12px;">+ New Preset</button>
+
+  <div id="newForm">
+    <div class="lbl">Name (Group/Sub/Name)</div>
+    <input id="newKey" class="field" type="text" placeholder="Flux/Styles/my_preset" autocomplete="off" autocapitalize="off" spellcheck="false"/>
+    <div class="gap"></div>
+    <div class="lbl">Text</div>
+    <textarea id="newText" class="field" placeholder="prompt text..."></textarea>
+    <div class="gap"></div>
+    <div class="row">
+      <button id="newCancel" class="btn">Cancel</button>
+      <button id="newCreate" class="btn create">Create</button>
+    </div>
+  </div>
+
+  <input id="search" type="text" placeholder="search presets..." autocomplete="off" autocapitalize="off" spellcheck="false"/>
+  <div id="list"><div class="empty">Loading…</div></div>
+
+<script>
+let PRESETS = {};
+let CARDS = [];
+const listEl = document.getElementById('list');
+const searchEl = document.getElementById('search');
+
+function keyHtml(key){
+  const parts = key.split('/');
+  return parts.map((p, i) => {
+    const t = document.createElement('span');
+    t.textContent = p;
+    if(i === parts.length - 1) t.className = 'leaf';
+    return t.outerHTML;
+  }).join('<span style="opacity:.4"> / </span>');
+}
+
+function fallbackCopy(text){
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.contentEditable = 'true'; ta.readOnly = false;
+  ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0'; ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  const range = document.createRange(); range.selectNodeContents(ta);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(ta);
+  return ok;
+}
+async function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    try { await navigator.clipboard.writeText(text); return true; } catch(e) {}
+  }
+  return fallbackCopy(text);
+}
+
+function flash(btn, msg, ok){
+  const orig = btn.textContent;
+  btn.textContent = msg;
+  if(ok) btn.classList.add('okflash');
+  setTimeout(() => { btn.textContent = orig; btn.classList.remove('okflash'); }, 1500);
+}
+
+async function apiPost(path, body){
+  try {
+    const r = await fetch(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return await r.json();
+  } catch(e) {
+    return { status: 'error', message: 'network error' };
+  }
+}
+
+function makeCard(key){
+  const text = (PRESETS[key] && PRESETS[key].text) || '';
+  const card = document.createElement('div'); card.className = 'card';
+
+  const k = document.createElement('div'); k.className = 'key'; k.innerHTML = keyHtml(key);
+
+  const ta = document.createElement('textarea'); ta.className = 'field'; ta.value = text;
+  ta.addEventListener('input', () => card.classList.add('dirty'));
+
+  const row = document.createElement('div'); row.className = 'row';
+
+  const copy = document.createElement('button'); copy.className = 'btn copy'; copy.textContent = 'Copy';
+  copy.addEventListener('click', async () => {
+    const ok = await copyText(ta.value);
+    flash(copy, ok ? 'Copied ✓' : 'Copy failed', ok);
+  });
+
+  const save = document.createElement('button'); save.className = 'btn save'; save.textContent = 'Save';
+  save.addEventListener('click', async () => {
+    const val = ta.value;
+    const res = await apiPost('/preset_loader/save', { key: key, text: val });
+    if(res.status === 'ok'){
+      PRESETS[key] = PRESETS[key] || {};
+      PRESETS[key].text = val.trim();
+      ta.value = PRESETS[key].text;
+      card.classList.remove('dirty');
+      flash(save, 'Saved ✓', true);
+    } else {
+      alert('Save failed: ' + (res.message || 'unknown'));
+    }
+  });
+
+  const del = document.createElement('button'); del.className = 'btn del'; del.textContent = 'Delete';
+  del.addEventListener('click', async () => {
+    if(!confirm('Delete "' + key + '"?\nIts preview image is also removed.')) return;
+    const res = await apiPost('/preset_loader/delete', { key: key });
+    if(res.status === 'ok'){
+      delete PRESETS[key];
+      CARDS = CARDS.filter(c => c.key !== key);
+      card.remove();
+      if(!CARDS.length) listEl.innerHTML = '<div class="empty">No presets yet.</div>';
+    } else {
+      alert('Delete failed: ' + (res.message || 'unknown'));
+    }
+  });
+
+  row.appendChild(copy); row.appendChild(save); row.appendChild(del);
+  card.appendChild(k); card.appendChild(ta); card.appendChild(row);
+  return card;
+}
+
+// Build every card once, then filter by toggling visibility so in-progress
+// edits are never discarded while searching.
+function renderAll(){
+  listEl.innerHTML = '';
+  CARDS = [];
+  const keys = Object.keys(PRESETS).sort();
+  if(!keys.length){ listEl.innerHTML = '<div class="empty">No presets yet.</div>'; return; }
+  for(const key of keys){
+    const el = makeCard(key);
+    CARDS.push({ key: key, el: el });
+    listEl.appendChild(el);
+  }
+  applyFilter(searchEl.value);
+}
+
+function applyFilter(filter){
+  const f = (filter || '').toLowerCase();
+  for(const c of CARDS){
+    c.el.style.display = (!f || c.key.toLowerCase().includes(f)) ? '' : 'none';
+  }
+}
+
+searchEl.addEventListener('input', () => applyFilter(searchEl.value));
+
+// ── New preset form ──────────────────────────────────────────────────────────
+const newBtn = document.getElementById('newBtn');
+const newForm = document.getElementById('newForm');
+const newKey = document.getElementById('newKey');
+const newText = document.getElementById('newText');
+function toggleNew(show){
+  newForm.style.display = show ? 'block' : 'none';
+  if(show) newKey.focus();
+}
+newBtn.addEventListener('click', () => toggleNew(newForm.style.display !== 'block'));
+document.getElementById('newCancel').addEventListener('click', () => toggleNew(false));
+document.getElementById('newCreate').addEventListener('click', async () => {
+  const key = newKey.value.trim();
+  if(!key){ alert('Enter a name, e.g. Flux/Styles/my_preset'); return; }
+  const text = newText.value;
+  const res = await apiPost('/preset_loader/save', { key: key, text: text });
+  if(res.status === 'ok'){
+    PRESETS[key] = { text: text.trim(), preview: null, preview_version: 0 };
+    newKey.value = ''; newText.value = '';
+    toggleNew(false);
+    renderAll();
+  } else {
+    alert('Create failed: ' + (res.message || 'unknown'));
+  }
+});
+
+async function loadPresets(){
+  try {
+    const r = await fetch('/preset_loader/list');
+    PRESETS = (await r.json()) || {};
+    renderAll();
+  } catch(e) {
+    listEl.innerHTML = '<div class="empty">Failed to load presets.</div>';
+  }
+}
+
+// Always read the file fresh when returning to this page — EXCEPT while you have
+// unsaved edits (a card in the "dirty" state), which must not be discarded.
+function hasUnsavedEdits(){ return CARDS.some(c => c.el.classList.contains('dirty')); }
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && !hasUnsavedEdits()) loadPresets();
+});
+window.addEventListener('focus', () => { if(!hasUnsavedEdits()) loadPresets(); });
+
+loadPresets();
+</script>
+</body>
+</html>

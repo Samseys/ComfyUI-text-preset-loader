@@ -366,6 +366,20 @@ app.registerExtension({
             origResize?.call(this, size);
         };
 
+        // ── NATIVE PRESET WIDGET (mobile / non-canvas frontends) ─────────────
+        // Python declares a real `preset` COMBO so frontends that don't run this
+        // JS (e.g. the experimental mobile frontend) can render and use the
+        // selector. On the desktop canvas we hide it — the rich DOM dropdown
+        // below replaces it — and keep it at "(none)" so the backend uses this
+        // node's editable text box instead of the preset.
+        const NONE_CHOICE = "(none)";
+        const presetWidget = node.widgets.find(w => w.name === "preset");
+        if (presetWidget) {
+            presetWidget.value = NONE_CHOICE;
+            presetWidget.hidden = true;
+            presetWidget.computeSize = () => [0, -4]; // collapse its reserved row
+        }
+
         // ── NATIVE TEXT WIDGET ───────────────────────────────────────────────
         const textWidget = node.widgets.find(w => w.name === "text");
         // element is the correct property (inputEl is deprecated)

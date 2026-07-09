@@ -10,6 +10,7 @@ BASE_DIR     = Path(__file__).resolve().parent
 DATA_DIR     = BASE_DIR / "data"
 PREVIEWS_DIR = DATA_DIR / "previews"
 JSON_PATH    = DATA_DIR / "presets.json"
+BROWSE_HTML  = BASE_DIR / "web" / "browse.html"  # standalone mobile editor page
 
 # if for some reason the user deleted the folder and the JSON
 DATA_DIR.mkdir(exist_ok=True)
@@ -258,18 +259,53 @@ async def serve_preview(request):
     return web.FileResponse(preview_path)
 
 
+@routes.get("/preset_loader/browse")
+async def browse_presets(request):
+    """
+    GET /preset_loader/browse
+    Serves the standalone, mobile-friendly editor page (web/browse.html). Open
+    this in a phone browser to edit a preset's text and save it, create new
+    presets, delete presets, or copy text to paste into the node's text box in
+    the mobile frontend. The page reuses the /preset_loader/list, /save, and
+    /delete endpoints. Served from disk each request, so edits to browse.html
+    take effect on reload without restarting ComfyUI.
+    """
+    if not BROWSE_HTML.exists():
+        return web.Response(status=404, text="browse.html not found")
+    return web.FileResponse(BROWSE_HTML)
+
+
 # NODE CLASS
 
 class PresetLoaderNode:
 
+    # Sentinel for "no preset selected" — kept as a constant so the JS and the
+    # backend agree on the exact string.
+    NONE_CHOICE = "(none)"
+
     @classmethod
     def INPUT_TYPES(cls):
+        # Build the dropdown choices from presets.json at object_info time.
+        # Declaring `preset` as a real widget (instead of a JS-only DOM widget)
+        # is what lets ANY frontend render the selector natively — including the
+        # experimental mobile frontend, which never runs our JS. Frontends re-fetch
+        # /object_info on reload, so newly saved presets appear after a refresh.
+        preset_choices = [cls.NONE_CHOICE] + list(load_presets().keys())
+        # NOTE: widget order matters. ComfyUI serializes widget values as a
+        # POSITIONAL array (widgets_values) with no keys, and restores them by
+        # position on load. `text` MUST stay first so workflows saved before the
+        # `preset` widget existed keep mapping their text to position 0. New
+        # widgets always go at the END to preserve backward compatibility.
         return {
             "required": {
                 "text": ("STRING", {
                     "multiline":   True,
                     "default":     "",
                     "placeholder": "Load a preset or type freely...",
+                }),
+                "preset": (preset_choices, {
+                    "default": cls.NONE_CHOICE,
+                    "tooltip": "Pick a preset. Used only when the text box is empty — anything typed in the text box overrides it.",
                 }),
             },
             "hidden": {
@@ -282,5 +318,20 @@ class PresetLoaderNode:
     FUNCTION     = "execute"
     CATEGORY     = "utils/presets"
 
-    def execute(self, text, unique_id=None):
+    def execute(self, preset=None, text="", unique_id=None):
+        # Priority: the text box wins. If you typed anything, that overrides the
+        # preset. Only when the text box is empty do we fall back to the selected
+        # preset's text. This makes the node usable on frontends that never run
+        # our JS (e.g. the mobile frontend): pick a preset and leave the box empty
+        # to use it as-is, or type in the box to override it.
+        #
+        # On desktop the DOM UI copies the chosen preset into the (editable) text
+        # box, so `text` is non-empty there and is used unchanged — behavior is
+        # identical to before.
+        if text and text.strip():
+            return (text,)
+        if preset and preset != self.NONE_CHOICE:
+            entry = load_presets().get(preset)
+            if entry and entry.get("text"):
+                return (entry["text"],)
         return (text,)
