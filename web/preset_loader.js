@@ -412,6 +412,9 @@ app.registerExtension({
                 flex-direction: column;
                 gap: 6px;
                 width: 100%;
+                min-width: 0;
+                max-width: 100%;
+                overflow: hidden;
                 box-sizing: border-box;
             `;
 
@@ -438,6 +441,8 @@ app.registerExtension({
                 user-select: none;
                 box-sizing: border-box;
                 flex-shrink: 0;
+                min-width: 0;
+                overflow: hidden;
             `;
 
             // Initial sync
@@ -445,7 +450,7 @@ app.registerExtension({
 
             // Observers are registered after updateLabel is defined — see below
 
-            dropdownEl.innerHTML = `<span id="pl-label">— select preset —</span><span style="color:#6a6880;font-size:9px;">▾</span>`;
+            dropdownEl.innerHTML = `<span id="pl-label" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">— select preset —</span><span style="color:#6a6880;font-size:9px;flex-shrink:0;margin-left:6px;">▾</span>`;
             dropdownEl.addEventListener("click", async () => {
                 // Re-read presets.json every time the dropdown opens so edits made
                 // elsewhere (e.g. the /preset_loader/browse page) show up without
@@ -615,13 +620,15 @@ app.registerExtension({
                 const btn = document.createElement("button");
                 btn.textContent = label;
                 btn.style.cssText = `
-                    flex:1;
+                    flex:1 1 0;
+                    min-width:0;
                     padding:6px 8px;
                     border-radius:5px;border:1px solid ${border};
                     background:${bg};color:${color};
                     font-family:monospace;font-size:9px;font-weight:600;
                     cursor:pointer;text-transform:uppercase;letter-spacing:1px;
                     box-sizing:border-box;white-space:nowrap;
+                    overflow:hidden;text-overflow:ellipsis;
                 `;
                 btn.addEventListener("mouseenter", () => { btn.style.borderColor = hBorder; btn.style.color = hColor; btn.style.background = hBg; });
                 btn.addEventListener("mouseleave", () => { btn.style.borderColor = border; btn.style.color = color; btn.style.background = bg; });
@@ -667,6 +674,14 @@ app.registerExtension({
         // buttons) so the native multiline `text` widget fills the rest. The
         // preview row collapses to 0 when hidden, so toggling it re-flows cleanly.
         uiWidget.computeSize = function (width) {
+            // Keep the DOM overlay pinned to the node's width. A DOM widget stores
+            // its own numeric `width`; if that ever drifts from the node (ComfyUI
+            // seeds it from the element's natural content width at creation) the
+            // overlay renders at that stale width and overflows the node — and the
+            // node looks un-resizable. Native widgets avoid this by leaving `width`
+            // undefined; we re-sync it here on every layout pass instead.
+            uiWidget.width = node.size[0];
+
             const root = uiWidget.element;
             let h = 0;
             let visibleRows = 0;
