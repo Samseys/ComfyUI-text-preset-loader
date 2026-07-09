@@ -388,8 +388,10 @@ app.registerExtension({
         const presetWidget = node.widgets.find(w => w.name === "preset");
         if (presetWidget) {
             presetWidget.value = NONE_CHOICE;
-            presetWidget.hidden = true;
-            presetWidget.computeSize = () => [0, -4]; // collapse its reserved row
+            presetWidget.hidden = true;                 // legacy canvas rendering
+            presetWidget.options = presetWidget.options || {};
+            presetWidget.options.hidden = true;         // Vue "nodes v2" rendering
+            presetWidget.computeSize = () => [0, -4];   // collapse its reserved row
         }
 
         // ── NATIVE TEXT WIDGET ───────────────────────────────────────────────
