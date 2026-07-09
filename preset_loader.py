@@ -239,6 +239,46 @@ async def set_preview(request):
         return web.json_response({"status": "error", "message": str(e)})
 
 
+@routes.post("/preset_loader/clear_preview")
+async def clear_preview(request):
+    """
+    POST /preset_loader/clear_preview
+    Removes a preset's preview image: deletes the file from disk and clears the
+    `preview`/`preview_version` fields. The JS calls this from the "clear" button.
+
+    Expected request body (JSON):
+    { "key": "Styles/lighting/golden_hour" }
+    """
+    try:
+        body = await request.json()
+        key  = body.get("key", "").strip()
+
+        if not key:
+            return web.json_response({"status": "error", "message": "No preset key provided"})
+
+        presets = load_presets()
+        if key not in presets:
+            return web.json_response({"status": "error", "message": "Preset not found"})
+
+        # Delete the preview file from disk if it exists
+        preview_filename = presets[key].get("preview")
+        if preview_filename:
+            preview_path = PREVIEWS_DIR / preview_filename
+            if preview_path.exists():
+                preview_path.unlink()
+
+        # Bump the version so any cached <img> stops pointing at the old file
+        current_version                 = presets[key].get("preview_version", 0)
+        presets[key]["preview"]         = None
+        presets[key]["preview_version"] = current_version + 1
+        save_presets(presets)
+
+        return web.json_response({"status": "ok"})
+
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
+
+
 @routes.get("/preset_loader/preview/{filename}")
 async def serve_preview(request):
     """

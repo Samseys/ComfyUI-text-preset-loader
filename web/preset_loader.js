@@ -11,8 +11,12 @@ import { app } from "../../scripts/app.js";
 const API_BASE = "/preset_loader";
 
 // ── TEXT AREA ────────────────────────────────────────────────────────────────
-const TEXT_HEIGHT_PERCENT = 0.15;  // % of node height the text area takes (0.15 = 15%)
-const TEXT_MIN_HEIGHT     = 60;    // minimum text area height in pixels
+const TEXT_MIN_HEIGHT     = 160;    // minimum text area height in pixels
+
+// ── PREVIEW ──────────────────────────────────────────────────────────────────
+const PREVIEW_HEIGHT     = 200;     // default height of the preview image box (px)
+const PREVIEW_MIN_HEIGHT = 80;      // smallest the drag handle allows (px)
+const PREVIEW_MAX_HEIGHT = 640;     // largest the drag handle allows (px)
 
 // ── NODE SIZE ────────────────────────────────────────────────────────────────
 const NODE_MIN_WIDTH  = 300;       // minimum node width in pixels
@@ -67,6 +71,15 @@ async function uploadPreview(key, file) {
     const res = await fetch(`${API_BASE}/set_preview`, {
         method: "POST",
         body: formData,
+    });
+    return await res.json();
+}
+
+async function clearPreview(key) {
+    const res = await fetch(`${API_BASE}/clear_preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
     });
     return await res.json();
 }
@@ -161,7 +174,6 @@ function showDeletePopup(key, onDeleted) {
         </div>
         <div style="font-size:11px;color:#9895b0;line-height:1.7;margin-bottom:6px;">
             Delete <strong style="color:#d0cde8;">"${key}"</strong> permanently?<br>
-            Its preview image will also be removed.
         </div>
         <div style="font-size:10px;color:#cc444488;margin-bottom:16px;">⚠ This cannot be undone.</div>
         <div style="display:flex;gap:6px;justify-content:flex-end;">
@@ -195,7 +207,7 @@ function buildTree(presets) {
     return tree;
 }
 
-function showDropdown(anchor, presets, currentKey, onSelect) {
+function showDropdown(anchor, presets, currentKey, onSelect, showPreviews = true) {
     document.getElementById("pl-dropdown")?.remove();
     document.getElementById("pl-active-tooltip")?.remove();
 
@@ -282,7 +294,7 @@ function showDropdown(anchor, presets, currentKey, onSelect) {
         `;
         item.innerHTML = `<span style="font-size:5px;color:${key === currentKey ? COLOR_ACCENT : "#4a4a64"};">◆</span> ${name}`;
 
-        if (preset?.preview) {
+        if (showPreviews && preset?.preview) {
             let tooltip = null;
             function removeTooltip() { tooltip?.remove(); tooltip = null; }
 
@@ -392,13 +404,6 @@ app.registerExtension({
             return { bg: cs.backgroundColor, color: cs.color };
         }
 
-        if (textWidget) {
-            textWidget.computeSize = function(width) {
-                const height = Math.max(Math.floor(node.size[1] * TEXT_HEIGHT_PERCENT), TEXT_MIN_HEIGHT);
-                return [width, height];
-            };
-        }
-
         // ── SINGLE CONTAINER WIDGET ──────────────────────────────────────────
         const uiWidget = node.addDOMWidget("preset_ui", "div", (() => {
             const root = document.createElement("div");
@@ -441,7 +446,11 @@ app.registerExtension({
             // Observers are registered after updateLabel is defined — see below
 
             dropdownEl.innerHTML = `<span id="pl-label">— select preset —</span><span style="color:#6a6880;font-size:9px;">▾</span>`;
-            dropdownEl.addEventListener("click", () => {
+            dropdownEl.addEventListener("click", async () => {
+                // Re-read presets.json every time the dropdown opens so edits made
+                // elsewhere (e.g. the /preset_loader/browse page) show up without
+                // reloading the workflow.
+                presets = await fetchPresets();
                 showDropdown(dropdownEl, presets, selectedKey, (key) => {
                     selectedKey = key;
                     persistKey();
@@ -449,32 +458,35 @@ app.registerExtension({
                     updateLabel();
                     updatePreview();
                     node.setDirtyCanvas(true);
-                });
+                }, previewEnabled());
             });
             dropdownEl.addEventListener("mouseenter", () => dropdownEl.style.borderColor = COLOR_ACCENT);
             dropdownEl.addEventListener("mouseleave", () => dropdownEl.style.borderColor = "#2e2e3c");
             root.appendChild(dropdownEl);
 
             // ── PREVIEW AREA ─────────────────────────────────────────────────
+            // Hidden by default; updatePreview() shows it when a preset with a
+            // preview image is selected AND the per-node "Show preset preview"
+            // toggle (right-click menu) is on. A fixed-height image box keeps the
+            // widget's computeSize deterministic.
             const previewArea = document.createElement("div");
             previewArea.id = "pl-preview-area";
             previewArea.style.cssText = `
                 display: none;
                 flex-direction: column;
                 gap: 4px;
-                flex-grow: 1;
-                min-height: 0;
                 box-sizing: border-box;
+                flex-shrink: 0;
             `;
 
             const imgBox = document.createElement("div");
+            imgBox.id = "pl-img-box";
             imgBox.style.cssText = `
                 background: ${COLOR_IMG_BOX_BG};
                 border: 1px solid #2e2e3c;
                 border-radius: 5px;
-                flex-grow: 1;
-                min-height: 0;
-                overflow: visible;
+                height: ${PREVIEW_HEIGHT}px;
+                overflow: hidden;
                 display: flex;
                 align-items: center;
                 justify-content: center;
@@ -484,7 +496,7 @@ app.registerExtension({
 
             const img = document.createElement("img");
             img.id = "pl-img";
-            img.style.cssText = "width:100%;height:100%;object-fit:fill;display:none;border-radius:4px;";
+            img.style.cssText = "max-width:100%;max-height:100%;object-fit:contain;display:none;border-radius:4px;";
             imgBox.appendChild(img);
 
             const noPreview = document.createElement("div");
@@ -495,7 +507,6 @@ app.registerExtension({
                 <span style="font-size:8px;color:#6a6880;letter-spacing:1px;">NO PREVIEW</span>
             `;
             imgBox.appendChild(noPreview);
-            previewArea.appendChild(imgBox);
 
             const fileInput = document.createElement("input");
             fileInput.type = "file";
@@ -527,6 +538,73 @@ app.registerExtension({
                 fileInput.value = "";
             });
             imgBox.appendChild(setImgBtn);
+
+            // Clear button — removes the current preset's preview image. Only shown
+            // when the selected preset actually has one (toggled in updatePreview).
+            const clearImgBtn = document.createElement("button");
+            clearImgBtn.id = "pl-clear-img";
+            clearImgBtn.textContent = "🗑 clear";
+            clearImgBtn.style.cssText = `
+                position:absolute;bottom:8px;left:8px;
+                background:rgba(0,0,0,0.65);border:1px solid ${COLOR_DELETE}66;border-radius:4px;
+                padding:3px 7px;font-family:monospace;font-size:9px;color:#c98a8a;
+                cursor:pointer;text-transform:uppercase;letter-spacing:0.5px;
+                backdrop-filter:blur(4px);z-index:1;display:none;
+            `;
+            clearImgBtn.addEventListener("mouseenter", () => { clearImgBtn.style.borderColor = COLOR_DELETE; clearImgBtn.style.color = "#ffffff"; });
+            clearImgBtn.addEventListener("mouseleave", () => { clearImgBtn.style.borderColor = `${COLOR_DELETE}66`; clearImgBtn.style.color = "#c98a8a"; });
+            clearImgBtn.addEventListener("click", async () => {
+                if (!selectedKey) return;
+                const result = await clearPreview(selectedKey);
+                if (result.status === "ok") { presets = await fetchPresets(); updatePreview(); }
+                else alert("Error clearing preview: " + result.message);
+            });
+            imgBox.appendChild(clearImgBtn);
+
+            // Drag handle — lets the user set the preview box height. The height is
+            // persisted in node.properties.previewHeight and reapplied on reload.
+            const resizeHandle = document.createElement("div");
+            resizeHandle.title = "Drag to resize preview";
+            resizeHandle.innerHTML = `<span style="font-size:9px;color:#6a6880;letter-spacing:2px;line-height:1;">⠿</span>`;
+            resizeHandle.style.cssText = `
+                position:absolute;bottom:0;left:50%;transform:translateX(-50%);
+                width:48px;height:14px;display:flex;align-items:center;justify-content:center;
+                cursor:ns-resize;z-index:2;border-top-left-radius:4px;border-top-right-radius:4px;
+                background:rgba(0,0,0,0.35);backdrop-filter:blur(2px);
+            `;
+            resizeHandle.addEventListener("mouseenter", () => resizeHandle.firstElementChild.style.color = COLOR_ACCENT);
+            resizeHandle.addEventListener("mouseleave", () => resizeHandle.firstElementChild.style.color = "#6a6880");
+            resizeHandle.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
+                e.stopPropagation();           // don't let LiteGraph start dragging the node
+                resizeHandle.setPointerCapture?.(e.pointerId);
+                const scale     = app.canvas?.ds?.scale || 1;  // overlay is CSS-scaled by zoom
+                const startY    = e.clientY;
+                const startBoxH = imgBox.offsetHeight;
+                const startNodeH = node.size[1];
+
+                const onMove = (ev) => {
+                    const delta = (ev.clientY - startY) / scale;
+                    const boxH  = Math.max(PREVIEW_MIN_HEIGHT, Math.min(PREVIEW_MAX_HEIGHT, startBoxH + delta));
+                    imgBox.style.height = boxH + "px";
+                    // Grow/shrink the node by the same amount so the text area above
+                    // keeps its size instead of being squeezed.
+                    node.setSize([node.size[0], startNodeH + (boxH - startBoxH)]);
+                    node.setDirtyCanvas(true, true);
+                };
+                const onUp = (ev) => {
+                    resizeHandle.releasePointerCapture?.(ev.pointerId);
+                    resizeHandle.removeEventListener("pointermove", onMove);
+                    resizeHandle.removeEventListener("pointerup", onUp);
+                    node.properties["previewHeight"] = imgBox.offsetHeight;
+                    node.setDirtyCanvas(true, true);
+                };
+                resizeHandle.addEventListener("pointermove", onMove);
+                resizeHandle.addEventListener("pointerup", onUp);
+            });
+            imgBox.appendChild(resizeHandle);
+
+            previewArea.appendChild(imgBox);
             root.appendChild(previewArea);
 
             // ── BUTTONS ROW ──────────────────────────────────────────────────
@@ -582,8 +660,36 @@ app.registerExtension({
             return root;
         })());
 
+        // ── SIZE THE UI WIDGET TO ITS CONTENT ────────────────────────────────
+        // By default a DOM widget is a "fill" widget: ComfyUI gives it all the
+        // node's leftover height, which shows up as an empty gap. Report only the
+        // natural height of the visible rows (dropdown + optional preview +
+        // buttons) so the native multiline `text` widget fills the rest. The
+        // preview row collapses to 0 when hidden, so toggling it re-flows cleanly.
+        uiWidget.computeSize = function (width) {
+            const root = uiWidget.element;
+            let h = 0;
+            let visibleRows = 0;
+            for (const child of root.children) {
+                const ch = child.offsetHeight;
+                if (ch > 0) { h += ch; visibleRows++; }
+            }
+            h += 6 * Math.max(0, visibleRows - 1); // column gap between visible rows
+            h += 18;                                // trim slack under the buttons
+            return [width, h > 0 ? h : 60];
+        };
+
         // ── WORKFLOW PERSISTENCE ─────────────────────────────────────────────
         node.properties = node.properties || {};
+
+        // Reapply a persisted preview height (set via the drag handle).
+        if (node.properties["previewHeight"]) {
+            const box = uiWidget.element.querySelector("#pl-img-box");
+            if (box) {
+                box.style.height = Math.max(PREVIEW_MIN_HEIGHT,
+                    Math.min(PREVIEW_MAX_HEIGHT, node.properties["previewHeight"])) + "px";
+            }
+        }
 
         const savedKey = node.properties["selectedKey"];
         if (savedKey) {
@@ -605,6 +711,80 @@ app.registerExtension({
         function persistKey() {
             node.properties["selectedKey"] = selectedKey;
         }
+
+        // Per-node preview toggle. Defaults to ON; persisted in the workflow via
+        // node.properties so it survives save/reload. Only an explicit `false`
+        // (set from the "Show preset preview" right-click menu) hides it.
+        function previewEnabled() {
+            return node.properties?.["showPreview"] !== false;
+        }
+
+        // Show / hide + populate the in-node preview image. Called whenever the
+        // selection, the presets data, or the toggle changes. Kept in sync with
+        // `previewEnabled()` so the "Show preset preview" menu item fully controls it.
+        function updatePreview() {
+            const el        = uiWidget.element;
+            const area      = el.querySelector("#pl-preview-area");
+            const img       = el.querySelector("#pl-img");
+            const noPreview = el.querySelector("#pl-no-preview");
+            const clearBtn  = el.querySelector("#pl-clear-img");
+            if (!area) return;
+
+            const preset = selectedKey ? presets[selectedKey] : null;
+
+            // The "clear" button only makes sense when the preset has an image.
+            if (clearBtn) clearBtn.style.display = preset?.preview ? "block" : "none";
+
+            // Hidden only when the toggle is off. When on, the box stays visible
+            // even with no preset selected — it shows the NO PREVIEW placeholder.
+            if (!previewEnabled()) {
+                area.style.display = "none";
+                node.setDirtyCanvas(true, true);
+                return;
+            }
+
+            area.style.display = "flex";
+
+            if (preset?.preview) {
+                img.style.display       = "block";
+                noPreview.style.display = "none";
+                // preview_version busts the cache on updates; the extra cb param
+                // forces a recheck so a deleted file falls back to NO PREVIEW.
+                img.src = `${API_BASE}/preview/${preset.preview}?v=${preset.preview_version ?? 0}&cb=${Date.now()}`;
+                img.onerror = () => {
+                    img.style.display       = "none";
+                    img.src                 = "";
+                    noPreview.style.display = "flex";
+                    img.onerror             = null;
+                    node.setDirtyCanvas(true, true);
+                };
+            } else {
+                img.style.display       = "none";
+                noPreview.style.display = "flex";
+            }
+
+            node.setDirtyCanvas(true, true);
+        }
+
+        // ── RIGHT-CLICK MENU: TOGGLE PREVIEW ─────────────────────────────────
+        // Adds a "Show preset preview" entry to the node's context menu. Enabling
+        // grows the node so the preview isn't cramped; disabling reclaims that
+        // space. Both paths recompute the DOM widget height via updatePreview().
+        const origGetExtraMenuOptions = node.getExtraMenuOptions;
+        node.getExtraMenuOptions = function (canvas, options) {
+            origGetExtraMenuOptions?.apply(this, arguments);
+            options.push({
+                content: (previewEnabled() ? "✔ " : "") + "Show preset preview",
+                callback: () => {
+                    const turningOn = !previewEnabled();
+                    node.properties["showPreview"] = turningOn;
+                    // Grow/shrink the node by the preview's footprint.
+                    const delta = (PREVIEW_HEIGHT + 6) * (turningOn ? 1 : -1);
+                    node.setSize([node.size[0], Math.max(NODE_MIN_HEIGHT, node.size[1] + delta)]);
+                    updatePreview();
+                },
+            });
+        };
 
         function updateLabel() {
             const label = uiWidget.element.querySelector("#pl-label");
@@ -643,45 +823,9 @@ app.registerExtension({
             attributes: true, attributeFilter: ["class", "style"]
         });
 
+        // Render the initial preview state so a fresh node (with no selection)
+        // shows the box by default instead of appearing only after a pick.
+        updatePreview();
 
-        function updatePreview() {
-            const el        = uiWidget.element;
-            const area      = el.querySelector("#pl-preview-area");
-            const img       = el.querySelector("#pl-img");
-            const noPreview = el.querySelector("#pl-no-preview");
-            const preset    = selectedKey ? presets[selectedKey] : null;
-
-            if (!selectedKey) {
-                area.style.display = "none";
-                node.setDirtyCanvas(true);
-                return;
-            }
-
-            area.style.display = "flex";
-
-            if (preset?.preview) {
-                img.style.display       = "block";
-                noPreview.style.display = "none";
-
-                // Always append a cache-bust param so deleted files are detected.
-                // We use preview_version for normal cache efficiency, but add
-                // a secondary ?cb= param to force a recheck on every updatePreview call.
-                // This way deleted files show NO PREVIEW immediately.
-                img.src = `${API_BASE}/preview/${preset.preview}?v=${preset.preview_version ?? 0}&cb=${Date.now()}`;
-
-                img.onerror = () => {
-                    img.style.display       = "none";
-                    img.src                 = "";
-                    noPreview.style.display = "flex";
-                    img.onerror             = null;
-                    node.setDirtyCanvas(true);
-                };
-            } else {
-                img.style.display       = "none";
-                noPreview.style.display = "flex";
-            }
-
-            node.setDirtyCanvas(true);
-        }
     },
 });
