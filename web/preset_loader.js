@@ -3,6 +3,7 @@
 // =============================================================================
 
 import { app } from "../../scripts/app.js";
+import { normalizeParts as compositionParts, resolvePreset as resolvePresetText, presetKind, openComposerModal, openPartModal, openPresetPicker, iconSvg, pathTone } from "./preset_composer.js";
 
 // =============================================================================
 // CONSTANTS
@@ -67,11 +68,11 @@ async function fetchPresets() {
     return await res.json();
 }
 
-async function savePreset(key, text) {
+async function savePreset(key, text, parts) {
     const res = await fetch(`${API_BASE}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, text }),
+        body: JSON.stringify(parts === undefined ? { key, text } : { key, text, parts }),
     });
     return await res.json();
 }
@@ -421,13 +422,13 @@ function showNamePopup(title, initialValue, confirmLabel, onConfirm) {
     setTimeout(() => { input.focus(); input.select(); }, 30);
 }
 
-function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreviews = true) {
+function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreviews = true, initialScope = "@prompts", createAction = null) {
     document.getElementById("pl-dropdown")?.remove();
     document.getElementById("pl-active-tooltip")?.remove();
 
     const keys = Object.keys(presets);
     const categoryCounts = new Map();
-    for (const key of keys) {
+    for (const key of keys.filter(key => presetKind(key, presets[key]) !== "part")) {
         const parts = key.split("/");
         parts.pop();
         for (let i = 1; i <= parts.length; i++) {
@@ -438,8 +439,14 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
     const categories = [...categoryCounts.entries()].sort((a, b) =>
         a[0].localeCompare(b[0], undefined, { sensitivity: "base", numeric: true })
     );
-    let activeCategory = currentKey?.includes("/")
-        ? currentKey.split("/").slice(0, -1).join("/") : "";
+    let activeCategory = currentKey
+        ? (presetKind(currentKey, presets[currentKey]) === "part" ? "@parts"
+            : currentKey.includes("/") ? currentKey.split("/").slice(0, -1).join("/") : "@prompts")
+        : initialScope;
+    const kindCounts = {
+        prompt: keys.filter(key => presetKind(key, presets[key]) !== "part").length,
+        part: keys.filter(key => presetKind(key, presets[key]) === "part").length,
+    };
     const pinnedCount = keys.filter(key => presets[key]?.pinned).length;
     const recentCount = keys.filter(key => presets[key]?.last_used_at).length;
 
@@ -447,7 +454,7 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
     container.id = "pl-dropdown";
     container.style.cssText = `
         position:fixed;width:min(540px,calc(100vw - 24px));height:min(390px,calc(100vh - 24px));
-        background:#17191f;border:1px solid #343946;border-radius:12px;z-index:9999;
+        background:#17191f;border:1px solid #343946;border-radius:12px;z-index:10030;
         box-shadow:0 22px 60px rgba(0,0,0,.68);overflow:hidden;
         font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
         display:flex;flex-direction:column;color:#eef0f4;
@@ -462,10 +469,10 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
     searchInput.addEventListener("focus", () => searchInput.style.borderColor = COLOR_ACCENT);
     searchInput.addEventListener("blur", () => searchInput.style.borderColor = "#303541");
     const libraryButton = document.createElement("button");
-    libraryButton.textContent = "Library";
-    libraryButton.title = "Open full prompt library";
+    libraryButton.textContent = createAction?.label || "Library";
+    libraryButton.title = createAction?.title || "Open full prompt library";
     libraryButton.style.cssText = "height:38px;border:1px solid #303541;border-radius:9px;background:#20232b;color:#cbd0dc;padding:0 12px;cursor:pointer;font:11px inherit;";
-    libraryButton.onclick = () => window.open(`${API_BASE}/browse`, "_blank", "noopener");
+    libraryButton.onclick = () => { if (createAction) { container.remove(); createAction.run(); } else window.open(`${API_BASE}/browse`, "_blank", "noopener"); };
     header.append(searchInput, libraryButton);
     container.appendChild(header);
 
@@ -506,11 +513,15 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
     function renderNav() {
         nav.replaceChildren();
         const title = document.createElement("div");
-        title.textContent = "Categories";
+        title.textContent = "Library";
         title.style.cssText = "padding:4px 8px 7px;color:#737a88;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;";
-        nav.append(title, navButton("All presets", keys.length, ""));
+        nav.append(title, navButton("Prompts", kindCounts.prompt, "@prompts"), navButton("Parts", kindCounts.part, "@parts"));
         if (pinnedCount) nav.appendChild(navButton("Pinned", pinnedCount, "@pinned"));
         if (recentCount) nav.appendChild(navButton("Recent", recentCount, "@recent"));
+        const categoryTitle = document.createElement("div");
+        categoryTitle.textContent = "Prompt categories";
+        categoryTitle.style.cssText = title.style.cssText + "margin-top:7px;border-top:1px solid #292d37;padding-top:10px;";
+        nav.append(categoryTitle);
         for (const [path, count] of categories) {
             const depth = Math.min(2, path.split("/").length - 1);
             nav.appendChild(navButton(path.split("/").pop(), count, path, depth));
@@ -526,12 +537,12 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
             button.onclick = () => { activeCategory = path; render(); };
             return button;
         };
-        crumbs.appendChild(makeCrumb("All", "", !activeCategory));
-        if (!activeCategory) return;
-        if (activeCategory === "@pinned" || activeCategory === "@recent") {
+        crumbs.appendChild(makeCrumb("Prompts", "@prompts", activeCategory === "@prompts"));
+        if (activeCategory.startsWith("@")) {
             const separator = document.createElement("span");
             separator.textContent = "/";
-            crumbs.append(separator, makeCrumb(activeCategory === "@pinned" ? "Pinned" : "Recent", activeCategory, true));
+            const labels = { "@pinned": "Pinned", "@recent": "Recent", "@parts": "Parts", "@prompts": "Prompts" };
+            if (activeCategory !== "@prompts") crumbs.append(separator, makeCrumb(labels[activeCategory] || "Library", activeCategory, true));
             return;
         }
         let path = "";
@@ -561,8 +572,9 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
         title.textContent = name;
         title.style.cssText = "font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
         const meta = document.createElement("div");
-        meta.textContent = parts.join(" / ") || "Uncategorised";
-        meta.style.cssText = "font-size:9px;color:#747b89;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        meta.style.cssText = "display:flex;gap:4px;font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        if (parts.length) parts.forEach((part, index) => { const crumb = document.createElement("span"); crumb.textContent = part; crumb.style.color = pathTone(part); meta.append(crumb); if (index < parts.length - 1) { const slash = document.createElement("span"); slash.textContent = "/"; slash.style.color = "#505765"; meta.append(slash); } });
+        else { meta.textContent = "Uncategorised"; meta.style.color = "#747b89"; }
         item.append(title, meta);
         item.onclick = () => {
             container.remove(); removeTooltip();
@@ -576,7 +588,7 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
             const tooltip = document.createElement("div");
             tooltip.id = "pl-active-tooltip";
             tooltip.style.cssText = `position:fixed;width:180px;height:120px;background:#0d0f13;border:1px solid #343946;
-                border-radius:9px;overflow:hidden;box-shadow:0 14px 38px rgba(0,0,0,.6);pointer-events:none;z-index:10000;`;
+                border-radius:9px;overflow:hidden;box-shadow:0 14px 38px rgba(0,0,0,.6);pointer-events:none;z-index:10031;`;
             const image = document.createElement("img");
             image.src = `${API_BASE}/preview/${encodeURIComponent(preset.preview)}?v=${preset.preview_version ?? 0}`;
             image.style.cssText = "width:100%;height:100%;object-fit:contain;";
@@ -595,8 +607,11 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
         results.replaceChildren();
         const query = searchInput.value.trim().toLocaleLowerCase();
         const matching = keys.filter(key =>
-            (!activeCategory || activeCategory === "@pinned" && presets[key]?.pinned ||
-                activeCategory === "@recent" && presets[key]?.last_used_at || key.startsWith(activeCategory + "/")) &&
+            (activeCategory === "@prompts" && presetKind(key, presets[key]) !== "part" ||
+                activeCategory === "@parts" && presetKind(key, presets[key]) === "part" ||
+                activeCategory === "@pinned" && presets[key]?.pinned ||
+                activeCategory === "@recent" && presets[key]?.last_used_at ||
+                !activeCategory.startsWith("@") && presetKind(key, presets[key]) !== "part" && key.startsWith(activeCategory + "/")) &&
             (!query || `${key} ${presets[key]?.text || ""}`.toLocaleLowerCase().includes(query))
         ).sort((a, b) => activeCategory === "@recent"
             ? String(presets[b]?.last_used_at || "").localeCompare(String(presets[a]?.last_used_at || ""))
@@ -614,7 +629,7 @@ function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreview
     function render() { renderNav(); renderCrumbs(); renderResults(); }
     searchInput.addEventListener("input", renderResults);
     searchInput.addEventListener("keydown", event => {
-        if (event.key === "Escape") { container.remove(); removeTooltip(); }
+        if (event.key === "Escape") { event.stopPropagation(); container.remove(); removeTooltip(); }
     });
 
     document.body.appendChild(container);
@@ -730,7 +745,7 @@ app.registerExtension({
                 color: #6a6880;
                 user-select: none;
                 box-sizing: border-box;
-                flex-shrink: 0;
+                flex: 1 1 auto;
                 min-width: 0;
                 overflow: hidden;
             `;
@@ -740,25 +755,35 @@ app.registerExtension({
 
             // Observers are registered after updateLabel is defined — see below
 
-            dropdownEl.innerHTML = `<span id="pl-label" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">— select preset —</span><span style="color:#6a6880;font-size:9px;flex-shrink:0;margin-left:6px;">▾</span>`;
+            dropdownEl.innerHTML = `<span id="pl-label" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">— select preset —</span><span style="color:#6a6880;flex-shrink:0;margin-left:6px;">${iconSvg("down", 14)}</span>`;
             dropdownEl.addEventListener("click", async () => {
                 // Re-read presets.json every time the dropdown opens so edits made
                 // elsewhere (e.g. the /preset_loader/browse page) show up without
                 // reloading the workflow.
                 presets = await fetchPresets();
-                showCategoryDropdown(dropdownEl, presets, selectedKey, (key) => {
+                openPresetPicker({ anchor: dropdownEl, presets, currentKey: selectedKey, mode: "prompts", onSelect: (key) => {
                     selectedKey = key;
                     persistKey();
-                    textWidget.value = presets[key].text;
-                    lastLoadedText = presets[key].text;
+                    textWidget.value = resolvePresetText(key, presets);
+                    lastLoadedText = textWidget.value;
                     updateLabel();
                     updatePreview();
                     node.setDirtyCanvas(true);
-                }, previewEnabled());
+                }});
             });
             dropdownEl.addEventListener("mouseenter", () => dropdownEl.style.borderColor = COLOR_ACCENT);
             dropdownEl.addEventListener("mouseleave", () => dropdownEl.style.borderColor = "#2e2e3c");
-            root.appendChild(dropdownEl);
+            const selectorRow = document.createElement("div");
+            selectorRow.style.cssText = "display:flex;align-items:stretch;gap:6px;width:100%;min-width:0;";
+            const newBtn = document.createElement("button");
+            newBtn.type = "button";
+            newBtn.innerHTML = iconSvg("plus", 17);
+            newBtn.title = "Create a prompt, composition, or reusable part";
+            newBtn.setAttribute("aria-label", "Create new");
+            newBtn.style.cssText = `flex:0 0 38px;display:grid;place-items:center;padding:0;border:1px solid ${COLOR_ACCENT};border-radius:5px;background:${COLOR_ACCENT}24;color:${COLOR_ACCENT};cursor:pointer;`;
+            newBtn.onclick = () => openNewMenu();
+            selectorRow.append(dropdownEl, newBtn);
+            root.appendChild(selectorRow);
 
             // ── PREVIEW AREA ─────────────────────────────────────────────────
             // Hidden by default; updatePreview() shows it when a preset with a
@@ -799,7 +824,7 @@ app.registerExtension({
             noPreview.id = "pl-no-preview";
             noPreview.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:24px 0;";
             noPreview.innerHTML = `
-                <span style="font-size:18px;opacity:0.2;">🖼</span>
+                <span style="opacity:0.2;">${iconSvg("image", 20)}</span>
                 <span style="font-size:8px;color:#6a6880;letter-spacing:1px;">NO PREVIEW</span>
             `;
             imgBox.appendChild(noPreview);
@@ -861,7 +886,7 @@ app.registerExtension({
             // persisted in node.properties.previewHeight and reapplied on reload.
             const resizeHandle = document.createElement("div");
             resizeHandle.title = "Drag to resize preview";
-            resizeHandle.innerHTML = `<span style="font-size:9px;color:#6a6880;letter-spacing:2px;line-height:1;">⠿</span>`;
+            resizeHandle.innerHTML = `<span style="color:#6a6880;">${iconSvg("gripHorizontal", 17)}</span>`;
             resizeHandle.style.cssText = `
                 position:absolute;bottom:0;left:50%;transform:translateX(-50%);
                 width:48px;height:14px;display:flex;align-items:center;justify-content:center;
@@ -926,19 +951,36 @@ app.registerExtension({
                 return btn;
             }
 
-            const updateBtn = makeBtn("Update", `${COLOR_ACCENT}24`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}55`);
+            const updateBtn = makeBtn("Save prompt", `${COLOR_ACCENT}24`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}55`);
             updateBtn.dataset.action = "update";
             updateBtn.onclick = async () => {
-                if (!selectedKey || textWidget.value === lastLoadedText) return;
+                const isComposition = Boolean(selectedKey && compositionParts(presets[selectedKey]).length);
+                if (isComposition) {
+                    openComposition(selectedKey);
+                    return;
+                }
+                if (!selectedKey) {
+                    if (!textWidget.value.trim()) return;
+                    showNamePopup("SAVE NEW PROMPT", "New prompt", "Create", async newKey => {
+                        presets = await fetchPresets();
+                        if (presets[newKey]) { alert("A preset with that name already exists."); return false; }
+                        const result = await savePreset(newKey, textWidget.value);
+                        if (result.status !== "ok") { alert("Save failed: " + result.message); return false; }
+                        presets = await fetchPresets(); selectedKey = newKey; lastLoadedText = textWidget.value;
+                        persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true); return true;
+                    });
+                    return;
+                }
+                if (textWidget.value === lastLoadedText) return;
                 const result = await savePreset(selectedKey, textWidget.value);
                 if (result.status !== "ok") return alert("Update failed: " + result.message);
                 presets = await fetchPresets();
-                textWidget.value = presets[selectedKey].text || "";
+                textWidget.value = resolvePresetText(selectedKey, presets);
                 lastLoadedText = textWidget.value;
                 updateLabel(); node.setDirtyCanvas(true);
             };
 
-            const copyBtn = makeBtn("Save copy", "transparent", "#4a4a64", "#b7bac5", COLOR_ACCENT, "#ffffff", "#252a34");
+            const copyBtn = makeBtn("Save as", "transparent", "#4a4a64", "#b7bac5", COLOR_ACCENT, "#ffffff", "#252a34");
             copyBtn.onclick = () => {
                 const suggested = selectedKey ? selectedKey + " copy" : "New preset";
                 showNamePopup("SAVE AS NEW PRESET", suggested, "Save copy", async newKey => {
@@ -948,57 +990,140 @@ app.registerExtension({
                         ? await presetAction("duplicate", { source_key: selectedKey, new_key: newKey })
                         : await savePreset(newKey, textWidget.value);
                     if (result.status !== "ok") { alert("Save failed: " + result.message); return false; }
-                    if (selectedKey) {
+                    if (selectedKey && !compositionParts(presets[selectedKey]).length) {
                         const textResult = await savePreset(newKey, textWidget.value);
                         if (textResult.status !== "ok") { alert("Save failed: " + textResult.message); return false; }
                     }
                     presets = await fetchPresets(); selectedKey = newKey;
-                    textWidget.value = presets[newKey].text || ""; lastLoadedText = textWidget.value;
+                    textWidget.value = resolvePresetText(newKey, presets); lastLoadedText = textWidget.value;
                     persistKey(); updateLabel(); updatePreview(); return true;
                 });
             };
 
-            const moreBtn = makeBtn("•••", "transparent", "#4a4a64", "#a7abb7", COLOR_ACCENT, "#ffffff", "#252a34");
-            moreBtn.style.flex = "0 0 44px";
-            moreBtn.title = "Preset actions";
-            moreBtn.onclick = () => {
-                document.getElementById("pl-actions-menu")?.remove();
-                if (!selectedKey) return alert("Please select a preset first.");
+            const openComposition = async (editingKey = null) => {
+                presets = await fetchPresets();
+                openComposerModal({
+                    presets,
+                    editingKey,
+                    pickPreset: (anchor, onPick) => openPresetPicker({
+                        anchor, presets, mode: "parts", onSelect: onPick,
+                        createAction: { label: "+ New", run: () => editPart(null, (key, entry) => onPick(key, entry)) },
+                    }),
+                    save: async ({ oldKey, key, text, parts, editedPresets = [] }) => {
+                        for (const edited of editedPresets) {
+                            const partResult = await savePreset(edited.key, edited.text);
+                            if (partResult.status !== "ok") throw new Error(partResult.message);
+                        }
+                        if (oldKey && oldKey !== key) {
+                            const renamed = await presetAction("rename", { old_key: oldKey, new_key: key });
+                            if (renamed.status !== "ok") throw new Error(renamed.message);
+                        }
+                        const result = await savePreset(key, text, parts);
+                        if (result.status !== "ok") throw new Error(result.message);
+                        presets = await fetchPresets(); selectedKey = key;
+                        textWidget.value = resolvePresetText(key, presets); lastLoadedText = textWidget.value;
+                        persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true);
+                    },
+                });
+            };
+
+            const editPart = async (editingKey = null, onSaved = null) => {
+                presets = await fetchPresets();
+                openPartModal({
+                    presets,
+                    editingKey,
+                    save: async ({ oldKey, key, text }) => {
+                        if (oldKey && oldKey !== key) {
+                            const renamed = await presetAction("rename", { old_key: oldKey, new_key: key });
+                            if (renamed.status !== "ok") throw new Error(renamed.message);
+                        }
+                        const result = await savePreset(key, text);
+                        if (result.status !== "ok") throw new Error(result.message);
+                        presets = await fetchPresets();
+                        if (selectedKey && presets[selectedKey]) {
+                            textWidget.value = resolvePresetText(selectedKey, presets);
+                            lastLoadedText = textWidget.value;
+                        }
+                        updateLabel(); node.setDirtyCanvas(true);
+                        onSaved?.(key, presets[key]);
+                    },
+                    remove: async key => {
+                        const result = await deletePreset(key);
+                        if (result.status !== "ok") throw new Error(result.message);
+                        presets = await fetchPresets();
+                    },
+                });
+            };
+
+            const openPartsManager = async (anchor = newBtn) => {
+                presets = await fetchPresets();
+                openPresetPicker({
+                    anchor, presets, mode: "parts", onSelect: key => editPart(key),
+                    createAction: { label: "+ New", run: () => editPart() },
+                });
+            };
+
+            const showActionMenu = (anchor, id, items) => {
+                document.getElementById(id)?.remove();
                 const menu = document.createElement("div");
-                menu.id = "pl-actions-menu";
-                menu.style.cssText = "position:fixed;z-index:10001;width:180px;padding:5px;background:#181a20;border:1px solid #363b47;border-radius:9px;box-shadow:0 16px 40px #0009;";
-                const addAction = (label, handler, danger = false) => {
+                menu.id = id;
+                menu.style.cssText = "position:fixed;z-index:10001;width:210px;padding:5px;background:#181a20;border:1px solid #363b47;border-radius:9px;box-shadow:0 16px 40px #0009;";
+                for (const item of items) {
+                    if (!item) continue;
+                    if (item.separator) { const line = document.createElement("div"); line.style.cssText = "height:1px;margin:5px;background:#2d313b;"; menu.append(line); continue; }
                     const action = document.createElement("button");
-                    action.textContent = label;
-                    action.style.cssText = `display:block;width:100%;border:0;border-radius:6px;background:transparent;color:${danger ? "#e78186" : "#c9ccd5"};padding:8px 9px;text-align:left;cursor:pointer;font:11px monospace;`;
+                    action.textContent = item.label;
+                    action.style.cssText = `display:block;width:100%;border:0;border-radius:6px;background:transparent;color:${item.danger ? "#e78186" : "#c9ccd5"};padding:9px 10px;text-align:left;cursor:pointer;font:11px monospace;`;
                     action.onmouseenter = () => action.style.background = "#252832";
                     action.onmouseleave = () => action.style.background = "transparent";
-                    action.onclick = () => { menu.remove(); handler(); };
-                    menu.appendChild(action);
-                };
-                addAction(presets[selectedKey]?.pinned ? "Unpin preset" : "Pin preset", async () => {
-                    await presetAction("pin", { key: selectedKey, pinned: !presets[selectedKey]?.pinned });
-                    presets = await fetchPresets(); updateLabel();
-                });
-                addAction("Rename / move…", () => showNamePopup("RENAME OR MOVE PRESET", selectedKey, "Move", async newKey => {
-                    const result = await presetAction("rename", { old_key: selectedKey, new_key: newKey });
-                    if (result.status !== "ok") { alert(result.message); return false; }
-                    selectedKey = result.key; presets = await fetchPresets();
-                    lastLoadedText = presets[selectedKey]?.text || textWidget.value;
-                    persistKey(); updateLabel(); updatePreview(); return true;
-                }));
-                addAction("Delete preset…", () => showDeletePopup(selectedKey, async () => {
-                    presets = await fetchPresets(); selectedKey = null; lastLoadedText = null;
-                    persistKey(); textWidget.value = ""; updateLabel(); updatePreview(); node.setDirtyCanvas(true);
-                }), true);
+                    action.onclick = () => { menu.remove(); item.run(); };
+                    menu.append(action);
+                }
                 document.body.appendChild(menu);
-                const rect = moreBtn.getBoundingClientRect(), box = menu.getBoundingClientRect();
+                const rect = anchor.getBoundingClientRect(), box = menu.getBoundingClientRect();
                 menu.style.left = Math.max(8, Math.min(innerWidth - box.width - 8, rect.right - box.width)) + "px";
                 menu.style.top = Math.max(8, rect.top - box.height - 6) + "px";
                 setTimeout(() => document.addEventListener("pointerdown", function close(event) {
-                    if (!menu.contains(event.target) && event.target !== moreBtn) { menu.remove(); document.removeEventListener("pointerdown", close, true); }
+                    if (!menu.contains(event.target) && event.target !== anchor) { menu.remove(); document.removeEventListener("pointerdown", close, true); }
                 }, true), 0);
             };
+
+            const openNewMenu = () => showActionMenu(newBtn, "pl-new-menu", [
+                { label: "New prompt", run: () => {
+                    if (textWidget.value.trim() && !confirm("Clear the current text and start a new prompt?")) return;
+                    selectedKey = null; lastLoadedText = null; textWidget.value = "";
+                    persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true);
+                } },
+                { label: "New composition", run: () => openComposition() },
+                { label: "New reusable part", run: () => editPart() },
+            ]);
+
+            const moreBtn = makeBtn("", "transparent", "#4a4a64", "#a7abb7", COLOR_ACCENT, "#ffffff", "#252a34");
+            moreBtn.innerHTML = iconSvg("more", 17);
+            moreBtn.style.display = "grid";
+            moreBtn.style.placeItems = "center";
+            moreBtn.style.flex = "0 0 44px";
+            moreBtn.title = "Library and preset actions";
+            moreBtn.onclick = () => showActionMenu(moreBtn, "pl-actions-menu", [
+                { label: "Browse prompt library", run: () => window.open(`${API_BASE}/browse`, "_blank", "noopener") },
+                { label: "Manage reusable parts", run: () => openPartsManager(moreBtn) },
+                selectedKey ? { separator: true } : null,
+                selectedKey ? { label: presets[selectedKey]?.pinned ? "Unpin preset" : "Pin preset", run: async () => {
+                    await presetAction("pin", { key: selectedKey, pinned: !presets[selectedKey]?.pinned });
+                    presets = await fetchPresets(); updateLabel();
+                } } : null,
+                selectedKey ? { label: "Rename / move…", run: () => showNamePopup("RENAME OR MOVE PRESET", selectedKey, "Move", async newKey => {
+                    const result = await presetAction("rename", { old_key: selectedKey, new_key: newKey });
+                    if (result.status !== "ok") { alert(result.message); return false; }
+                    selectedKey = result.key; presets = await fetchPresets();
+                    lastLoadedText = resolvePresetText(selectedKey, presets) || textWidget.value;
+                    persistKey(); updateLabel(); updatePreview(); return true;
+                }) } : null,
+                selectedKey ? { label: "Delete preset…", danger: true, run: () => showDeletePopup(selectedKey, async () => {
+                    presets = await fetchPresets(); selectedKey = null; lastLoadedText = null;
+                    persistKey(); textWidget.value = ""; updateLabel(); updatePreview(); node.setDirtyCanvas(true);
+                }) } : null,
+            ]);
 
             btnRow.append(updateBtn, copyBtn, moreBtn);
             root.appendChild(btnRow);
@@ -1051,7 +1176,7 @@ app.registerExtension({
                 presets = p;
                 if (presets[savedKey]) {
                     selectedKey = savedKey;
-                    lastLoadedText = presets[savedKey].text;
+                    lastLoadedText = resolvePresetText(savedKey, presets);
                     updateLabel();
                     updatePreview();
                     node.setDirtyCanvas(true);
@@ -1145,16 +1270,21 @@ app.registerExtension({
             const label = uiWidget.element.querySelector("#pl-label");
             const updateButton = uiWidget.element.querySelector('[data-action="update"]');
             const { color } = getThemeColors();
-            const dirty = Boolean(selectedKey && lastLoadedText !== null && textWidget.value !== lastLoadedText);
+            const isComposition = Boolean(selectedKey && compositionParts(presets[selectedKey]).length);
+            const dirty = Boolean(selectedKey && !isComposition && lastLoadedText !== null && textWidget.value !== lastLoadedText);
+            const hasDraft = Boolean(!selectedKey && textWidget.value.trim());
+            const canAct = isComposition || dirty || hasDraft;
             if (updateButton) {
-                updateButton.disabled = !dirty;
-                updateButton.style.opacity = dirty ? "1" : ".42";
-                updateButton.style.cursor = dirty ? "pointer" : "default";
+                updateButton.textContent = isComposition ? "Edit composition" : selectedKey ? "Update" : "Save prompt";
+                updateButton.disabled = !canAct;
+                updateButton.style.opacity = canAct ? "1" : ".42";
+                updateButton.style.cursor = canAct ? "pointer" : "default";
+                updateButton.title = isComposition ? "Edit this composition" : selectedKey ? "Save changes to this preset" : "Save this text as a new prompt";
             }
 
             if (!selectedKey) {
                 label.style.color = color;
-                label.innerHTML = "— select preset —";
+                label.innerHTML = hasDraft ? `<span style="color:${COLOR_PRESET_NAME};">Unsaved prompt</span>` : "— select a prompt —";
                 return;
             }
             const parts = selectedKey.split("/");
@@ -1162,9 +1292,9 @@ app.registerExtension({
             const pathHtml = parts.map((p, i) =>
                 i === parts.length - 1
                     ? `<span style="color:${COLOR_PRESET_NAME};">${p}</span>`
-                    : `<span style="color:${color};">${p}</span>`
-            ).join(`<span style="color:${color};opacity:0.4;margin:0 2px;">/</span>`);
-            const pin = presets[selectedKey]?.pinned ? `<span style="color:#ef88a7;margin-right:5px;">♥</span>` : "";
+                    : `<span style="color:${pathTone(p)};">${p}</span>`
+            ).join(`<span style="color:#59606d;margin:0 3px;">/</span>`);
+            const pin = presets[selectedKey]?.pinned ? `<span style="display:inline-flex;color:#ef88a7;margin-right:5px;vertical-align:middle;">${iconSvg("heart", 13)}</span>` : "";
             const changed = dirty ? `<span title="Unsaved changes" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${COLOR_ACCENT};margin-left:7px;vertical-align:middle;"></span>` : "";
             label.innerHTML = pin + pathHtml + changed;
         }
@@ -1203,7 +1333,7 @@ app.registerExtension({
                 lastLoadedText = null;
                 persistKey();
             } else if (selectedKey && change.key === selectedKey) {
-                const nextText = presets[selectedKey].text || "";
+                const nextText = resolvePresetText(selectedKey, presets);
                 // Preserve an in-progress manual edit; otherwise follow the
                 // externally saved preset immediately.
                 if (textWidget.value === previousText) textWidget.value = nextText;
@@ -1222,6 +1352,8 @@ app.registerExtension({
             document.getElementById("pl-dropdown")?.remove();
             document.getElementById("pl-active-tooltip")?.remove();
             document.getElementById("pl-actions-menu")?.remove();
+            const composerModal = document.getElementById("pl-composer-modal");
+            if (composerModal) composerModal.dismiss?.();
             originalRemoved?.apply(this, arguments);
         };
 

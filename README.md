@@ -47,6 +47,17 @@ Camera/Portrait/close_up
 - Rename/move, pin/unpin, and delete are available from the node's actions menu.
 - Browser edits and pin changes are propagated to open nodes without reloading.
 
+## Preset composition
+
+In the browser editor, add existing presets under **Composition parts** to build
+a larger prompt from reusable sections. Parts can be reordered, disabled, or
+removed, and the resolved raw output is shown before saving. Wildcard syntax is
+left unchanged for downstream wildcard nodes to process.
+
+Compositions store references rather than copies. Renaming a referenced preset
+updates those references; a referenced preset cannot be deleted until it is
+removed from its compositions.
+
 ## usage in workflow
 1. connect the output of the Preset Loader Node to the input of a Text concatenate Node.
 2. use the other input of the Text concatenate Node to add any additional text you want to include in your prompt.

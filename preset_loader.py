@@ -124,6 +124,55 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def normalize_parts(parts) -> list[dict]:
+    """Return the stable on-disk representation for composition parts."""
+    if not isinstance(parts, list):
+        return []
+    normalized = []
+    for part in parts:
+        if isinstance(part, str):
+            key, text, enabled = part.strip(), "", True
+        elif isinstance(part, dict):
+            key = str(part.get("key", "")).strip()
+            text = str(part.get("text", ""))
+            enabled = bool(part.get("enabled", True))
+        else:
+            continue
+        if key:
+            normalized.append({"key": key, "enabled": enabled})
+        elif text.strip():
+            normalized.append({
+                "text": text,
+                "label": str(part.get("label", "Custom")).strip() or "Custom",
+                "enabled": enabled,
+            })
+    return normalized
+
+
+def resolve_preset(key: str, presets: dict, stack=None) -> str:
+    """Resolve a composition to raw text; wildcard syntax is never parsed."""
+    stack = [] if stack is None else stack
+    if key in stack:
+        raise ValueError("Circular composition: " + " -> ".join(stack + [key]))
+    entry = presets.get(key)
+    if not isinstance(entry, dict):
+        raise ValueError(f'Missing preset referenced by composition: "{key}"')
+    parts = normalize_parts(entry.get("parts"))
+    own_text = str(entry.get("text", "")).strip()
+    if not parts:
+        return own_text
+    resolved = []
+    for part in parts:
+        if part["enabled"]:
+            text = (resolve_preset(part["key"], presets, stack + [key])
+                    if part.get("key") else part.get("text", "")).strip()
+            if text:
+                resolved.append(text)
+    if own_text:
+        resolved.append(own_text)
+    return "\n\n".join(resolved)
+
+
 # API endpoints
 routes = server.PromptServer.instance.routes
 
@@ -181,6 +230,7 @@ async def save_preset(request):
         body = await request.json()
         key  = body.get("key", "").strip()
         text = body.get("text", "").strip()
+        parts_supplied = "parts" in body
 
         if not key:
             return web.json_response({"status": "error", "message": "Preset name cannot be empty"})
@@ -188,8 +238,14 @@ async def save_preset(request):
         async with _write_lock:
             presets  = load_presets()
             existing = presets.get(key, {})
-            presets[key] = {
-                "text":            text,
+            parts = normalize_parts(body.get("parts") if parts_supplied else existing.get("parts"))
+            if any(part.get("key") == key for part in parts):
+                return web.json_response({"status": "error", "message": "A composition cannot include itself"})
+            missing = [part["key"] for part in parts if part.get("key") and part["key"] not in presets]
+            if missing:
+                return web.json_response({"status": "error", "message": f'Missing preset: {missing[0]}'})
+            entry = {
+                "parts":           parts,
                 "preview":         existing.get("preview", None),
                 "preview_version": existing.get("preview_version", 0),
                 "pinned":          existing.get("pinned", False),
@@ -197,6 +253,10 @@ async def save_preset(request):
                 "updated_at":      utc_now(),
                 "last_used_at":    existing.get("last_used_at", None),
             }
+            if not parts:
+                entry["text"] = text
+            presets[key] = entry
+            resolve_preset(key, presets)
             save_presets(presets)
         publish_change("save", key)
         return web.json_response({"status": "ok"})
@@ -230,6 +290,13 @@ async def rename_preset(request):
                 entry["preview_version"] = entry.get("preview_version", 0) + 1
             entry["updated_at"] = utc_now()
             presets[new_key] = entry
+            for candidate in presets.values():
+                parts = normalize_parts(candidate.get("parts"))
+                for part in parts:
+                    if part.get("key") == old_key:
+                        part["key"] = new_key
+                if parts:
+                    candidate["parts"] = parts
             save_presets(presets)
         publish_change("rename", new_key)
         return web.json_response({"status": "ok", "key": new_key})
@@ -327,6 +394,13 @@ async def delete_preset(request):
             presets = load_presets()
             if key not in presets:
                 return web.json_response({"status": "error", "message": "Preset not found"})
+            used_by = [name for name, entry in presets.items()
+                       if any(part.get("key") == key for part in normalize_parts(entry.get("parts")))]
+            if used_by:
+                return web.json_response({
+                    "status": "error",
+                    "message": f'Preset is used by composition: {used_by[0]}',
+                })
             preview_filename = presets[key].get("preview")
             if preview_filename:
                 preview_path = PREVIEWS_DIR / preview_filename
@@ -501,7 +575,9 @@ class PresetLoaderNode:
         # is what lets ANY frontend render the selector natively — including the
         # experimental mobile frontend, which never runs our JS. Frontends re-fetch
         # /object_info on reload, so newly saved presets appear after a refresh.
-        preset_choices = [cls.NONE_CHOICE] + list(load_presets().keys())
+        preset_choices = [cls.NONE_CHOICE] + [
+            key for key in load_presets() if not key.startswith("Parts/")
+        ]
         # NOTE: widget order matters. ComfyUI serializes widget values as a
         # POSITIONAL array (widgets_values) with no keys, and restores them by
         # position on load. `text` MUST stay first so workflows saved before the
@@ -542,7 +618,11 @@ class PresetLoaderNode:
         if text and text.strip():
             return (text,)
         if preset and preset != self.NONE_CHOICE:
-            entry = load_presets().get(preset)
-            if entry and entry.get("text"):
-                return (entry["text"],)
+            presets = load_presets()
+            entry = presets.get(preset)
+            if entry:
+                try:
+                    return (resolve_preset(preset, presets),)
+                except ValueError:
+                    return (entry.get("text", ""),)
         return (text,)
