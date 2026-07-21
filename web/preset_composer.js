@@ -103,6 +103,14 @@ export function resolvePreset(key, presets, stack = []) {
     return chunks.join("\n\n");
 }
 
+// crypto.randomUUID() only exists in secure contexts (HTTPS/localhost). Phones
+// reach ComfyUI over plain-HTTP LAN IPs, where it is undefined and throws, so
+// fall back to a plain unique id generator.
+let uidCounter = 0;
+function uid() {
+    return `${Date.now().toString(36)}-${(uidCounter++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -121,7 +129,7 @@ export function createPartsEditor({ presets, initialParts = [], excludeKey = nul
     picker.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;";
     const input = element("input");
     input.placeholder = "Search or choose a preset";
-    input.setAttribute("list", `plc-options-${crypto.randomUUID()}`);
+    input.setAttribute("list", `plc-options-${uid()}`);
     input.style.cssText = "min-width:0;height:42px;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:0 12px;outline:none;";
     const options = element("datalist");
     options.id = input.getAttribute("list");
