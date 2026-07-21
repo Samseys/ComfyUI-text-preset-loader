@@ -9,6 +9,27 @@ import { app } from "../../scripts/app.js";
 // =============================================================================
 
 const API_BASE = "/preset_loader";
+const presetChangeListeners = new Set();
+let presetEventSource = null;
+
+function subscribePresetChanges(listener) {
+    presetChangeListeners.add(listener);
+    if (!presetEventSource) {
+        presetEventSource = new EventSource(`${API_BASE}/events`);
+        presetEventSource.addEventListener("presets-changed", (event) => {
+            let detail = {};
+            try { detail = JSON.parse(event.data || "{}"); } catch (_) {}
+            for (const notify of [...presetChangeListeners]) notify(detail);
+        });
+    }
+    return () => {
+        presetChangeListeners.delete(listener);
+        if (!presetChangeListeners.size && presetEventSource) {
+            presetEventSource.close();
+            presetEventSource = null;
+        }
+    };
+}
 
 // ── TEXT AREA ────────────────────────────────────────────────────────────────
 const TEXT_MIN_HEIGHT     = 160;    // minimum text area height in pixels
@@ -80,6 +101,15 @@ async function clearPreview(key) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key }),
+    });
+    return await res.json();
+}
+
+async function presetAction(action, body) {
+    const res = await fetch(`${API_BASE}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
     });
     return await res.json();
 }
@@ -353,6 +383,263 @@ function showDropdown(anchor, presets, currentKey, onSelect, showPreviews = true
     }, 0);
 }
 
+function showNamePopup(title, initialValue, confirmLabel, onConfirm) {
+    const { overlay, popup } = createPopupBase();
+    const heading = document.createElement("div");
+    heading.textContent = title;
+    heading.style.cssText = `font-size:13px;font-weight:700;color:${COLOR_ACCENT};margin-bottom:12px;letter-spacing:.08em;`;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = initialValue || "";
+    input.placeholder = "Category/Subcategory/Name";
+    input.style.cssText = `background:#13131a;border:1px solid ${COLOR_ACCENT}66;border-radius:6px;padding:8px 10px;
+        font-family:monospace;font-size:12px;color:#d0cde8;width:100%;outline:none;box-sizing:border-box;margin-bottom:14px;`;
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:7px;justify-content:flex-end;";
+    const cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    const confirm = document.createElement("button");
+    confirm.textContent = confirmLabel;
+    for (const button of [cancel, confirm]) button.style.cssText = "padding:6px 14px;border-radius:5px;border:1px solid #4a4a64;background:transparent;color:#c8cad2;font:10px monospace;cursor:pointer;";
+    confirm.style.background = COLOR_ACCENT;
+    confirm.style.borderColor = COLOR_ACCENT;
+    confirm.style.color = "#11151d";
+    confirm.style.fontWeight = "700";
+    cancel.onclick = () => overlay.remove();
+    confirm.onclick = async () => {
+        const value = input.value.trim();
+        if (!value) return;
+        const ok = await onConfirm(value);
+        if (ok !== false) overlay.remove();
+    };
+    input.onkeydown = event => {
+        if (event.key === "Enter") confirm.click();
+        if (event.key === "Escape") overlay.remove();
+    };
+    actions.append(cancel, confirm);
+    popup.append(heading, input, actions);
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
+function showCategoryDropdown(anchor, presets, currentKey, onSelect, showPreviews = true) {
+    document.getElementById("pl-dropdown")?.remove();
+    document.getElementById("pl-active-tooltip")?.remove();
+
+    const keys = Object.keys(presets);
+    const categoryCounts = new Map();
+    for (const key of keys) {
+        const parts = key.split("/");
+        parts.pop();
+        for (let i = 1; i <= parts.length; i++) {
+            const path = parts.slice(0, i).join("/");
+            categoryCounts.set(path, (categoryCounts.get(path) || 0) + 1);
+        }
+    }
+    const categories = [...categoryCounts.entries()].sort((a, b) =>
+        a[0].localeCompare(b[0], undefined, { sensitivity: "base", numeric: true })
+    );
+    let activeCategory = currentKey?.includes("/")
+        ? currentKey.split("/").slice(0, -1).join("/") : "";
+    const pinnedCount = keys.filter(key => presets[key]?.pinned).length;
+    const recentCount = keys.filter(key => presets[key]?.last_used_at).length;
+
+    const container = document.createElement("div");
+    container.id = "pl-dropdown";
+    container.style.cssText = `
+        position:fixed;width:min(540px,calc(100vw - 24px));height:min(390px,calc(100vh - 24px));
+        background:#17191f;border:1px solid #343946;border-radius:12px;z-index:9999;
+        box-shadow:0 22px 60px rgba(0,0,0,.68);overflow:hidden;
+        font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+        display:flex;flex-direction:column;color:#eef0f4;
+    `;
+
+    const header = document.createElement("div");
+    header.style.cssText = "padding:10px;border-bottom:1px solid #292d37;display:flex;gap:8px;align-items:center;";
+    const searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.placeholder = "Search presets and prompt text…";
+    searchInput.style.cssText = "min-width:0;flex:1;height:38px;background:#101216;border:1px solid #303541;border-radius:9px;padding:0 11px;outline:none;color:#eef0f4;font:12px inherit;";
+    searchInput.addEventListener("focus", () => searchInput.style.borderColor = COLOR_ACCENT);
+    searchInput.addEventListener("blur", () => searchInput.style.borderColor = "#303541");
+    const libraryButton = document.createElement("button");
+    libraryButton.textContent = "Library";
+    libraryButton.title = "Open full prompt library";
+    libraryButton.style.cssText = "height:38px;border:1px solid #303541;border-radius:9px;background:#20232b;color:#cbd0dc;padding:0 12px;cursor:pointer;font:11px inherit;";
+    libraryButton.onclick = () => window.open(`${API_BASE}/browse`, "_blank", "noopener");
+    header.append(searchInput, libraryButton);
+    container.appendChild(header);
+
+    const main = document.createElement("div");
+    main.style.cssText = "display:grid;grid-template-columns:158px minmax(0,1fr);min-height:0;flex:1;";
+    const nav = document.createElement("div");
+    nav.style.cssText = "padding:7px;border-right:1px solid #292d37;overflow-y:auto;background:#14161b;";
+    const content = document.createElement("div");
+    content.style.cssText = "min-width:0;display:flex;flex-direction:column;overflow:hidden;";
+    const crumbs = document.createElement("div");
+    crumbs.style.cssText = "min-height:38px;padding:8px 11px;border-bottom:1px solid #292d37;display:flex;align-items:center;gap:5px;color:#858b99;font-size:10px;white-space:nowrap;overflow:hidden;";
+    const results = document.createElement("div");
+    results.style.cssText = "padding:7px;overflow-y:auto;min-height:0;flex:1;";
+    content.append(crumbs, results);
+    main.append(nav, content);
+    container.appendChild(main);
+
+    function navButton(label, count, path, depth = 0) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.style.cssText = `width:100%;display:flex;align-items:center;gap:6px;border:0;border-radius:7px;
+            background:${activeCategory === path ? COLOR_ACCENT + "1c" : "transparent"};
+            color:${activeCategory === path ? "#a9beff" : "#a9aebb"};padding:7px 8px 7px ${8 + depth * 13}px;
+            cursor:pointer;text-align:left;font:11px inherit;`;
+        const text = document.createElement("span");
+        text.textContent = label;
+        text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        const badge = document.createElement("span");
+        badge.textContent = count;
+        badge.style.cssText = "margin-left:auto;color:#6f7583;font-size:9px;font-variant-numeric:tabular-nums;";
+        button.append(text, badge);
+        button.onclick = () => { activeCategory = path; render(); };
+        button.onmouseenter = () => { if (activeCategory !== path) button.style.background = "#20232b"; };
+        button.onmouseleave = () => { if (activeCategory !== path) button.style.background = "transparent"; };
+        return button;
+    }
+
+    function renderNav() {
+        nav.replaceChildren();
+        const title = document.createElement("div");
+        title.textContent = "Categories";
+        title.style.cssText = "padding:4px 8px 7px;color:#737a88;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;";
+        nav.append(title, navButton("All presets", keys.length, ""));
+        if (pinnedCount) nav.appendChild(navButton("Pinned", pinnedCount, "@pinned"));
+        if (recentCount) nav.appendChild(navButton("Recent", recentCount, "@recent"));
+        for (const [path, count] of categories) {
+            const depth = Math.min(2, path.split("/").length - 1);
+            nav.appendChild(navButton(path.split("/").pop(), count, path, depth));
+        }
+    }
+
+    function renderCrumbs() {
+        crumbs.replaceChildren();
+        const makeCrumb = (label, path, current) => {
+            const button = document.createElement("button");
+            button.textContent = label;
+            button.style.cssText = `border:0;background:transparent;padding:2px;color:${current ? "#e6e9ef" : "#858b99"};cursor:pointer;font:10px inherit;`;
+            button.onclick = () => { activeCategory = path; render(); };
+            return button;
+        };
+        crumbs.appendChild(makeCrumb("All", "", !activeCategory));
+        if (!activeCategory) return;
+        if (activeCategory === "@pinned" || activeCategory === "@recent") {
+            const separator = document.createElement("span");
+            separator.textContent = "/";
+            crumbs.append(separator, makeCrumb(activeCategory === "@pinned" ? "Pinned" : "Recent", activeCategory, true));
+            return;
+        }
+        let path = "";
+        for (const part of activeCategory.split("/")) {
+            const separator = document.createElement("span");
+            separator.textContent = "/";
+            crumbs.appendChild(separator);
+            path = path ? `${path}/${part}` : part;
+            crumbs.appendChild(makeCrumb(part, path, path === activeCategory));
+        }
+    }
+
+    function removeTooltip() {
+        document.getElementById("pl-active-tooltip")?.remove();
+    }
+
+    function makeResult(key) {
+        const preset = presets[key] || {};
+        const parts = key.split("/");
+        const name = parts.pop();
+        const item = document.createElement("button");
+        item.type = "button";
+        item.style.cssText = `width:100%;display:block;border:1px solid ${key === currentKey ? COLOR_ACCENT + "55" : "transparent"};
+            border-radius:8px;background:${key === currentKey ? COLOR_ACCENT + "16" : "transparent"};padding:8px 9px;
+            color:#d8dbe3;text-align:left;cursor:pointer;margin-bottom:3px;`;
+        const title = document.createElement("div");
+        title.textContent = name;
+        title.style.cssText = "font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        const meta = document.createElement("div");
+        meta.textContent = parts.join(" / ") || "Uncategorised";
+        meta.style.cssText = "font-size:9px;color:#747b89;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        item.append(title, meta);
+        item.onclick = () => {
+            container.remove(); removeTooltip();
+            presetAction("touch", { key }).catch(() => {});
+            onSelect(key, preset);
+        };
+        item.onmouseenter = () => {
+            if (key !== currentKey) item.style.background = "#22252d";
+            if (!showPreviews || !preset.preview) return;
+            removeTooltip();
+            const tooltip = document.createElement("div");
+            tooltip.id = "pl-active-tooltip";
+            tooltip.style.cssText = `position:fixed;width:180px;height:120px;background:#0d0f13;border:1px solid #343946;
+                border-radius:9px;overflow:hidden;box-shadow:0 14px 38px rgba(0,0,0,.6);pointer-events:none;z-index:10000;`;
+            const image = document.createElement("img");
+            image.src = `${API_BASE}/preview/${encodeURIComponent(preset.preview)}?v=${preset.preview_version ?? 0}`;
+            image.style.cssText = "width:100%;height:100%;object-fit:contain;";
+            tooltip.appendChild(image);
+            document.body.appendChild(tooltip);
+            const box = item.getBoundingClientRect();
+            const left = Math.min(innerWidth - 190, box.right + 8);
+            tooltip.style.left = Math.max(8, left) + "px";
+            tooltip.style.top = Math.max(8, Math.min(innerHeight - 128, box.top - 35)) + "px";
+        };
+        item.onmouseleave = () => { if (key !== currentKey) item.style.background = "transparent"; removeTooltip(); };
+        return item;
+    }
+
+    function renderResults() {
+        results.replaceChildren();
+        const query = searchInput.value.trim().toLocaleLowerCase();
+        const matching = keys.filter(key =>
+            (!activeCategory || activeCategory === "@pinned" && presets[key]?.pinned ||
+                activeCategory === "@recent" && presets[key]?.last_used_at || key.startsWith(activeCategory + "/")) &&
+            (!query || `${key} ${presets[key]?.text || ""}`.toLocaleLowerCase().includes(query))
+        ).sort((a, b) => activeCategory === "@recent"
+            ? String(presets[b]?.last_used_at || "").localeCompare(String(presets[a]?.last_used_at || ""))
+            : a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+        if (!matching.length) {
+            const empty = document.createElement("div");
+            empty.textContent = "No matching presets";
+            empty.style.cssText = "padding:18px 10px;color:#737a88;font-size:10px;text-align:center;";
+            results.appendChild(empty);
+            return;
+        }
+        for (const key of matching) results.appendChild(makeResult(key));
+    }
+
+    function render() { renderNav(); renderCrumbs(); renderResults(); }
+    searchInput.addEventListener("input", renderResults);
+    searchInput.addEventListener("keydown", event => {
+        if (event.key === "Escape") { container.remove(); removeTooltip(); }
+    });
+
+    document.body.appendChild(container);
+    const rect = anchor.getBoundingClientRect();
+    const box = container.getBoundingClientRect();
+    const left = Math.max(8, Math.min(innerWidth - box.width - 8, rect.left));
+    const roomBelow = innerHeight - rect.bottom;
+    const top = roomBelow >= box.height + 6
+        ? rect.bottom + 5 : Math.max(8, rect.top - box.height - 5);
+    container.style.left = left + "px";
+    container.style.top = top + "px";
+    render();
+
+    setTimeout(() => {
+        const outsideHandler = event => {
+            if (!container.contains(event.target) && !anchor.contains(event.target)) {
+                container.remove(); removeTooltip();
+                document.removeEventListener("pointerdown", outsideHandler, true);
+            }
+        };
+        document.addEventListener("pointerdown", outsideHandler, true);
+        searchInput.focus();
+    }, 0);
+}
+
 // =============================================================================
 // EXTENSION
 // =============================================================================
@@ -366,6 +653,7 @@ app.registerExtension({
         // ── STATE ────────────────────────────────────────────────────────────
         let presets     = {};
         let selectedKey = null;
+        let lastLoadedText = null;
 
         presets = await fetchPresets();
 
@@ -458,10 +746,11 @@ app.registerExtension({
                 // elsewhere (e.g. the /preset_loader/browse page) show up without
                 // reloading the workflow.
                 presets = await fetchPresets();
-                showDropdown(dropdownEl, presets, selectedKey, (key) => {
+                showCategoryDropdown(dropdownEl, presets, selectedKey, (key) => {
                     selectedKey = key;
                     persistKey();
                     textWidget.value = presets[key].text;
+                    lastLoadedText = presets[key].text;
                     updateLabel();
                     updatePreview();
                     node.setDirtyCanvas(true);
@@ -637,33 +926,81 @@ app.registerExtension({
                 return btn;
             }
 
-            const saveBtn = makeBtn("💾 Save As", `${COLOR_ACCENT}30`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}60`);
-            saveBtn.addEventListener("click", () => {
-                showSaveAsPopup(selectedKey, textWidget.value, async (savedKey) => {
-                    presets = await fetchPresets();
-                    selectedKey = savedKey;
-                    persistKey();
-                    updateLabel();
-                    updatePreview();
-                });
-            });
+            const updateBtn = makeBtn("Update", `${COLOR_ACCENT}24`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}55`);
+            updateBtn.dataset.action = "update";
+            updateBtn.onclick = async () => {
+                if (!selectedKey || textWidget.value === lastLoadedText) return;
+                const result = await savePreset(selectedKey, textWidget.value);
+                if (result.status !== "ok") return alert("Update failed: " + result.message);
+                presets = await fetchPresets();
+                textWidget.value = presets[selectedKey].text || "";
+                lastLoadedText = textWidget.value;
+                updateLabel(); node.setDirtyCanvas(true);
+            };
 
-            const deleteBtn = makeBtn("🗑 Delete", `${COLOR_DELETE}20`, COLOR_DELETE, COLOR_DELETE, "#ff6666", "#ffffff", `${COLOR_DELETE}40`);
-            deleteBtn.addEventListener("click", () => {
-                if (!selectedKey) { alert("Please select a preset first."); return; }
-                showDeletePopup(selectedKey, async () => {
+            const copyBtn = makeBtn("Save copy", "transparent", "#4a4a64", "#b7bac5", COLOR_ACCENT, "#ffffff", "#252a34");
+            copyBtn.onclick = () => {
+                const suggested = selectedKey ? selectedKey + " copy" : "New preset";
+                showNamePopup("SAVE AS NEW PRESET", suggested, "Save copy", async newKey => {
                     presets = await fetchPresets();
-                    selectedKey = null;
-                    persistKey();
-                    textWidget.value = "";
-                    updateLabel();
-                    updatePreview();
-                    node.setDirtyCanvas(true);
+                    if (presets[newKey]) { alert("A preset with that name already exists."); return false; }
+                    const result = selectedKey
+                        ? await presetAction("duplicate", { source_key: selectedKey, new_key: newKey })
+                        : await savePreset(newKey, textWidget.value);
+                    if (result.status !== "ok") { alert("Save failed: " + result.message); return false; }
+                    if (selectedKey) {
+                        const textResult = await savePreset(newKey, textWidget.value);
+                        if (textResult.status !== "ok") { alert("Save failed: " + textResult.message); return false; }
+                    }
+                    presets = await fetchPresets(); selectedKey = newKey;
+                    textWidget.value = presets[newKey].text || ""; lastLoadedText = textWidget.value;
+                    persistKey(); updateLabel(); updatePreview(); return true;
                 });
-            });
+            };
 
-            btnRow.appendChild(saveBtn);
-            btnRow.appendChild(deleteBtn);
+            const moreBtn = makeBtn("•••", "transparent", "#4a4a64", "#a7abb7", COLOR_ACCENT, "#ffffff", "#252a34");
+            moreBtn.style.flex = "0 0 44px";
+            moreBtn.title = "Preset actions";
+            moreBtn.onclick = () => {
+                document.getElementById("pl-actions-menu")?.remove();
+                if (!selectedKey) return alert("Please select a preset first.");
+                const menu = document.createElement("div");
+                menu.id = "pl-actions-menu";
+                menu.style.cssText = "position:fixed;z-index:10001;width:180px;padding:5px;background:#181a20;border:1px solid #363b47;border-radius:9px;box-shadow:0 16px 40px #0009;";
+                const addAction = (label, handler, danger = false) => {
+                    const action = document.createElement("button");
+                    action.textContent = label;
+                    action.style.cssText = `display:block;width:100%;border:0;border-radius:6px;background:transparent;color:${danger ? "#e78186" : "#c9ccd5"};padding:8px 9px;text-align:left;cursor:pointer;font:11px monospace;`;
+                    action.onmouseenter = () => action.style.background = "#252832";
+                    action.onmouseleave = () => action.style.background = "transparent";
+                    action.onclick = () => { menu.remove(); handler(); };
+                    menu.appendChild(action);
+                };
+                addAction(presets[selectedKey]?.pinned ? "Unpin preset" : "Pin preset", async () => {
+                    await presetAction("pin", { key: selectedKey, pinned: !presets[selectedKey]?.pinned });
+                    presets = await fetchPresets(); updateLabel();
+                });
+                addAction("Rename / move…", () => showNamePopup("RENAME OR MOVE PRESET", selectedKey, "Move", async newKey => {
+                    const result = await presetAction("rename", { old_key: selectedKey, new_key: newKey });
+                    if (result.status !== "ok") { alert(result.message); return false; }
+                    selectedKey = result.key; presets = await fetchPresets();
+                    lastLoadedText = presets[selectedKey]?.text || textWidget.value;
+                    persistKey(); updateLabel(); updatePreview(); return true;
+                }));
+                addAction("Delete preset…", () => showDeletePopup(selectedKey, async () => {
+                    presets = await fetchPresets(); selectedKey = null; lastLoadedText = null;
+                    persistKey(); textWidget.value = ""; updateLabel(); updatePreview(); node.setDirtyCanvas(true);
+                }), true);
+                document.body.appendChild(menu);
+                const rect = moreBtn.getBoundingClientRect(), box = menu.getBoundingClientRect();
+                menu.style.left = Math.max(8, Math.min(innerWidth - box.width - 8, rect.right - box.width)) + "px";
+                menu.style.top = Math.max(8, rect.top - box.height - 6) + "px";
+                setTimeout(() => document.addEventListener("pointerdown", function close(event) {
+                    if (!menu.contains(event.target) && event.target !== moreBtn) { menu.remove(); document.removeEventListener("pointerdown", close, true); }
+                }, true), 0);
+            };
+
+            btnRow.append(updateBtn, copyBtn, moreBtn);
             root.appendChild(btnRow);
 
             return root;
@@ -714,6 +1051,7 @@ app.registerExtension({
                 presets = p;
                 if (presets[savedKey]) {
                     selectedKey = savedKey;
+                    lastLoadedText = presets[savedKey].text;
                     updateLabel();
                     updatePreview();
                     node.setDirtyCanvas(true);
@@ -767,7 +1105,7 @@ app.registerExtension({
                 noPreview.style.display = "none";
                 // preview_version busts the cache on updates; the extra cb param
                 // forces a recheck so a deleted file falls back to NO PREVIEW.
-                img.src = `${API_BASE}/preview/${preset.preview}?v=${preset.preview_version ?? 0}&cb=${Date.now()}`;
+                img.src = `${API_BASE}/preview/${encodeURIComponent(preset.preview)}?v=${preset.preview_version ?? 0}`;
                 img.onerror = () => {
                     img.style.display       = "none";
                     img.src                 = "";
@@ -805,7 +1143,14 @@ app.registerExtension({
 
         function updateLabel() {
             const label = uiWidget.element.querySelector("#pl-label");
+            const updateButton = uiWidget.element.querySelector('[data-action="update"]');
             const { color } = getThemeColors();
+            const dirty = Boolean(selectedKey && lastLoadedText !== null && textWidget.value !== lastLoadedText);
+            if (updateButton) {
+                updateButton.disabled = !dirty;
+                updateButton.style.opacity = dirty ? "1" : ".42";
+                updateButton.style.cursor = dirty ? "pointer" : "default";
+            }
 
             if (!selectedKey) {
                 label.style.color = color;
@@ -814,11 +1159,14 @@ app.registerExtension({
             }
             const parts = selectedKey.split("/");
             label.style.color = color;
-            label.innerHTML = parts.map((p, i) =>
+            const pathHtml = parts.map((p, i) =>
                 i === parts.length - 1
                     ? `<span style="color:${COLOR_PRESET_NAME};">${p}</span>`
                     : `<span style="color:${color};">${p}</span>`
             ).join(`<span style="color:${color};opacity:0.4;margin:0 2px;">/</span>`);
+            const pin = presets[selectedKey]?.pinned ? `<span style="color:#ef88a7;margin-right:5px;">♥</span>` : "";
+            const changed = dirty ? `<span title="Unsaved changes" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${COLOR_ACCENT};margin-left:7px;vertical-align:middle;"></span>` : "";
+            label.innerHTML = pin + pathHtml + changed;
         }
 
         // ── THEME CHANGE OBSERVERS ──────────────────────────────────────────
@@ -831,14 +1179,51 @@ app.registerExtension({
             updateLabel();
         }
 
+        const themeObservers = [];
+        const onTextEdited = () => { updateLabel(); node.setDirtyCanvas(true); };
+        textWidgetEl?.addEventListener("input", onTextEdited);
         if (textWidgetEl) {
-            new MutationObserver(syncTheme).observe(textWidgetEl, {
+            const textObserver = new MutationObserver(syncTheme);
+            textObserver.observe(textWidgetEl, {
                 attributes: true, attributeFilter: ["style", "class"]
             });
+            themeObservers.push(textObserver);
         }
-        new MutationObserver(syncTheme).observe(document.body, {
+        const bodyObserver = new MutationObserver(syncTheme);
+        bodyObserver.observe(document.body, {
             attributes: true, attributeFilter: ["class", "style"]
         });
+        themeObservers.push(bodyObserver);
+
+        const unsubscribeChanges = subscribePresetChanges(async (change) => {
+            const previousText = lastLoadedText;
+            presets = await fetchPresets();
+            if (selectedKey && !presets[selectedKey]) {
+                selectedKey = null;
+                lastLoadedText = null;
+                persistKey();
+            } else if (selectedKey && change.key === selectedKey) {
+                const nextText = presets[selectedKey].text || "";
+                // Preserve an in-progress manual edit; otherwise follow the
+                // externally saved preset immediately.
+                if (textWidget.value === previousText) textWidget.value = nextText;
+                lastLoadedText = nextText;
+            }
+            updateLabel();
+            updatePreview();
+            node.setDirtyCanvas(true, true);
+        });
+
+        const originalRemoved = node.onRemoved;
+        node.onRemoved = function () {
+            unsubscribeChanges();
+            for (const observer of themeObservers) observer.disconnect();
+            textWidgetEl?.removeEventListener("input", onTextEdited);
+            document.getElementById("pl-dropdown")?.remove();
+            document.getElementById("pl-active-tooltip")?.remove();
+            document.getElementById("pl-actions-menu")?.remove();
+            originalRemoved?.apply(this, arguments);
+        };
 
         // Render the initial preview state so a fresh node (with no selection)
         // shows the box by default instead of appearing only after a pick.

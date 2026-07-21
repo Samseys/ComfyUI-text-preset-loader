@@ -1,5 +1,10 @@
 import json
 import io
+import asyncio
+import os
+import tempfile
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from aiohttp import web
 from PIL import Image
@@ -11,6 +16,10 @@ DATA_DIR     = BASE_DIR / "data"
 PREVIEWS_DIR = DATA_DIR / "previews"
 JSON_PATH    = DATA_DIR / "presets.json"
 BROWSE_HTML  = BASE_DIR / "web" / "browse.html"  # standalone mobile editor page
+
+_write_lock = asyncio.Lock()
+_subscribers: set[asyncio.Queue] = set()
+_revision = 0
 
 # if for some reason the user deleted the folder and the JSON
 DATA_DIR.mkdir(exist_ok=True)
@@ -69,10 +78,37 @@ def save_presets(data: dict) -> None:
     indent=2 keeps it human-readable so users can hand-edit it if they want.
     ensure_ascii=False preserves non-latin characters (Japanese tags, etc.)
     """
-    JSON_PATH.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8"
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    fd, temp_name = tempfile.mkstemp(
+        prefix="presets-", suffix=".tmp", dir=str(DATA_DIR)
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, JSON_PATH)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def publish_change(action: str, key: str | None = None) -> None:
+    """Notify all open canvas/browser clients after a successful mutation."""
+    global _revision
+    _revision += 1
+    event = {"revision": _revision, "action": action, "key": key}
+    for queue in tuple(_subscribers):
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            # A refresh event is only an invalidation signal, so retaining the
+            # newest event is enough for a slow/background browser tab.
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(event)
 
 
 def preset_key_to_filename(key: str) -> str:
@@ -82,6 +118,10 @@ def preset_key_to_filename(key: str) -> str:
     We replace "/" with "_" because slashes are not valid in filenames.
     """
     return key.replace("/", "_") + ".jpg"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # API endpoints
@@ -97,6 +137,34 @@ async def list_presets(request):
     """
     presets = load_presets()
     return web.json_response(presets)
+
+
+@routes.get("/preset_loader/events")
+async def preset_events(request):
+    """Server-sent invalidation events shared by canvas and mobile clients."""
+    response = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+    await response.prepare(request)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    _subscribers.add(queue)
+    try:
+        await response.write(b"event: ready\ndata: {}\n\n")
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=20)
+                payload = json.dumps(event, ensure_ascii=False)
+                await response.write(f"event: presets-changed\ndata: {payload}\n\n".encode("utf-8"))
+            except asyncio.TimeoutError:
+                await response.write(b": keepalive\n\n")
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    finally:
+        _subscribers.discard(queue)
+    return response
 
 
 @routes.post("/preset_loader/save")
@@ -117,18 +185,124 @@ async def save_preset(request):
         if not key:
             return web.json_response({"status": "error", "message": "Preset name cannot be empty"})
 
-        presets  = load_presets()
-        existing = presets.get(key, {})
-
-        presets[key] = {
-            "text":            text,
-            "preview":         existing.get("preview", None),
-            "preview_version": existing.get("preview_version", 0),
-        }
-
-        save_presets(presets)
+        async with _write_lock:
+            presets  = load_presets()
+            existing = presets.get(key, {})
+            presets[key] = {
+                "text":            text,
+                "preview":         existing.get("preview", None),
+                "preview_version": existing.get("preview_version", 0),
+                "pinned":          existing.get("pinned", False),
+                "created_at":      existing.get("created_at", utc_now()),
+                "updated_at":      utc_now(),
+                "last_used_at":    existing.get("last_used_at", None),
+            }
+            save_presets(presets)
+        publish_change("save", key)
         return web.json_response({"status": "ok"})
 
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
+
+
+@routes.post("/preset_loader/rename")
+async def rename_preset(request):
+    try:
+        body = await request.json()
+        old_key = body.get("old_key", "").strip()
+        new_key = body.get("new_key", "").strip()
+        if not old_key or not new_key:
+            return web.json_response({"status": "error", "message": "Both names are required"})
+        async with _write_lock:
+            presets = load_presets()
+            if old_key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            if new_key != old_key and new_key in presets:
+                return web.json_response({"status": "error", "message": "A preset with that name already exists"})
+            entry = presets.pop(old_key)
+            if entry.get("preview"):
+                old_path = PREVIEWS_DIR / entry["preview"]
+                new_filename = preset_key_to_filename(new_key)
+                new_path = PREVIEWS_DIR / new_filename
+                if old_path.exists() and old_path != new_path:
+                    old_path.replace(new_path)
+                entry["preview"] = new_filename
+                entry["preview_version"] = entry.get("preview_version", 0) + 1
+            entry["updated_at"] = utc_now()
+            presets[new_key] = entry
+            save_presets(presets)
+        publish_change("rename", new_key)
+        return web.json_response({"status": "ok", "key": new_key})
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
+
+
+@routes.post("/preset_loader/duplicate")
+async def duplicate_preset(request):
+    try:
+        body = await request.json()
+        source_key = body.get("source_key", "").strip()
+        new_key = body.get("new_key", "").strip()
+        if not source_key or not new_key:
+            return web.json_response({"status": "error", "message": "Source and new name are required"})
+        async with _write_lock:
+            presets = load_presets()
+            if source_key not in presets:
+                return web.json_response({"status": "error", "message": "Source preset not found"})
+            if new_key in presets:
+                return web.json_response({"status": "error", "message": "A preset with that name already exists"})
+            source = presets[source_key]
+            entry = dict(source)
+            if source.get("preview"):
+                old_path = PREVIEWS_DIR / source["preview"]
+                new_filename = preset_key_to_filename(new_key)
+                if old_path.exists():
+                    shutil.copy2(old_path, PREVIEWS_DIR / new_filename)
+                    entry["preview"] = new_filename
+            entry["pinned"] = False
+            entry["created_at"] = utc_now()
+            entry["updated_at"] = entry["created_at"]
+            entry["last_used_at"] = None
+            entry["preview_version"] = entry.get("preview_version", 0) + 1
+            presets[new_key] = entry
+            save_presets(presets)
+        publish_change("duplicate", new_key)
+        return web.json_response({"status": "ok", "key": new_key})
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
+
+
+@routes.post("/preset_loader/pin")
+async def pin_preset(request):
+    try:
+        body = await request.json()
+        key = body.get("key", "").strip()
+        pinned = bool(body.get("pinned", True))
+        async with _write_lock:
+            presets = load_presets()
+            if key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            presets[key]["pinned"] = pinned
+            save_presets(presets)
+        publish_change("pin", key)
+        return web.json_response({"status": "ok", "pinned": pinned})
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
+
+
+@routes.post("/preset_loader/touch")
+async def touch_preset(request):
+    try:
+        body = await request.json()
+        key = body.get("key", "").strip()
+        async with _write_lock:
+            presets = load_presets()
+            if key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            presets[key]["last_used_at"] = utc_now()
+            save_presets(presets)
+        publish_change("touch", key)
+        return web.json_response({"status": "ok"})
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)})
 
@@ -149,20 +323,18 @@ async def delete_preset(request):
         if not key:
             return web.json_response({"status": "error", "message": "No preset key provided"})
 
-        presets = load_presets()
-
-        if key not in presets:
-            return web.json_response({"status": "error", "message": "Preset not found"})
-
-        # Delete the preview image from disk if it exists
-        preview_filename = presets[key].get("preview")
-        if preview_filename:
-            preview_path = PREVIEWS_DIR / preview_filename
-            if preview_path.exists():
-                preview_path.unlink()
-
-        del presets[key]
-        save_presets(presets)
+        async with _write_lock:
+            presets = load_presets()
+            if key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            preview_filename = presets[key].get("preview")
+            if preview_filename:
+                preview_path = PREVIEWS_DIR / preview_filename
+                if preview_path.exists():
+                    preview_path.unlink()
+            del presets[key]
+            save_presets(presets)
+        publish_change("delete", key)
 
         return web.json_response({"status": "ok"})
 
@@ -195,10 +367,6 @@ async def set_preview(request):
         if not key or not img_data:
             return web.json_response({"status": "error", "message": "Missing key or file"})
 
-        presets = load_presets()
-        if key not in presets:
-            return web.json_response({"status": "error", "message": "Preset not found"})
-
         # Validate and resize with Pillow.
         # verify() does a deep integrity check — raises if not a valid image.
         # We reopen after verify() because verify() closes the file handle.
@@ -219,15 +387,19 @@ async def set_preview(request):
         image.thumbnail((1000, 1000), Image.LANCZOS)
 
         # Save as JPEG — much smaller than PNG for photos
-        filename     = preset_key_to_filename(key)
-        preview_path = PREVIEWS_DIR / filename
-        image.save(preview_path, format="JPEG", quality=85, optimize=True)
+        async with _write_lock:
+            presets = load_presets()
+            if key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            filename = preset_key_to_filename(key)
+            preview_path = PREVIEWS_DIR / filename
+            image.save(preview_path, format="JPEG", quality=85, optimize=True)
+            current_version = presets[key].get("preview_version", 0)
+            presets[key]["preview"] = filename
+            presets[key]["preview_version"] = current_version + 1
+            save_presets(presets)
 
-        # Increment preview_version so the browser busts its cache
-        current_version             = presets[key].get("preview_version", 0)
-        presets[key]["preview"]         = filename
-        presets[key]["preview_version"] = current_version + 1
-        save_presets(presets)
+        publish_change("preview", key)
 
         return web.json_response({
             "status":          "ok",
@@ -256,22 +428,21 @@ async def clear_preview(request):
         if not key:
             return web.json_response({"status": "error", "message": "No preset key provided"})
 
-        presets = load_presets()
-        if key not in presets:
-            return web.json_response({"status": "error", "message": "Preset not found"})
+        async with _write_lock:
+            presets = load_presets()
+            if key not in presets:
+                return web.json_response({"status": "error", "message": "Preset not found"})
+            preview_filename = presets[key].get("preview")
+            if preview_filename:
+                preview_path = PREVIEWS_DIR / preview_filename
+                if preview_path.exists():
+                    preview_path.unlink()
+            current_version = presets[key].get("preview_version", 0)
+            presets[key]["preview"] = None
+            presets[key]["preview_version"] = current_version + 1
+            save_presets(presets)
 
-        # Delete the preview file from disk if it exists
-        preview_filename = presets[key].get("preview")
-        if preview_filename:
-            preview_path = PREVIEWS_DIR / preview_filename
-            if preview_path.exists():
-                preview_path.unlink()
-
-        # Bump the version so any cached <img> stops pointing at the old file
-        current_version                 = presets[key].get("preview_version", 0)
-        presets[key]["preview"]         = None
-        presets[key]["preview_version"] = current_version + 1
-        save_presets(presets)
+        publish_change("preview", key)
 
         return web.json_response({"status": "ok"})
 
