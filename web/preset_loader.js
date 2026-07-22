@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { app } from "../../scripts/app.js";
-import { normalizeParts as compositionParts, resolvePreset as resolvePresetText, presetKind, openComposerModal, openPartModal, openPresetPicker, iconSvg, pathTone } from "./preset_composer.js";
+import { resolvePreset as resolvePresetText, presetKind, isComposition, openPresetEditor, openPartCreator, openPresetPicker, iconSvg, pathTone } from "./preset_composer.js";
 
 // =============================================================================
 // CONSTANTS
@@ -701,6 +701,14 @@ app.registerExtension({
         const textWidget = node.widgets.find(w => w.name === "text");
         // element is the correct property (inputEl is deprecated)
         const textWidgetEl = textWidget?.element ?? null;
+        // The text box is a read-only preview of the resolved prompt. Editing a
+        // preset's content happens in the unified editor; the box just shows (and
+        // carries, for the output) the composed result of the current selection.
+        if (textWidgetEl) {
+            textWidgetEl.readOnly = true;
+            textWidgetEl.style.cursor = "default";
+            textWidgetEl.title = "Resolved prompt (read-only) — use Edit to change it";
+        }
 
         // Helper — reads current text widget colours from the live theme
         function getThemeColors() {
@@ -778,10 +786,10 @@ app.registerExtension({
             const newBtn = document.createElement("button");
             newBtn.type = "button";
             newBtn.innerHTML = iconSvg("plus", 17);
-            newBtn.title = "Create a prompt, composition, or reusable part";
-            newBtn.setAttribute("aria-label", "Create new");
+            newBtn.title = "Create a new prompt";
+            newBtn.setAttribute("aria-label", "Create new prompt");
             newBtn.style.cssText = `flex:0 0 38px;display:grid;place-items:center;padding:0;border:1px solid ${COLOR_ACCENT};border-radius:5px;background:${COLOR_ACCENT}24;color:${COLOR_ACCENT};cursor:pointer;`;
-            newBtn.onclick = () => openNewMenu();
+            newBtn.onclick = () => openMainEditor(null);
             selectorRow.append(dropdownEl, newBtn);
             root.appendChild(selectorRow);
 
@@ -951,115 +959,71 @@ app.registerExtension({
                 return btn;
             }
 
-            const updateBtn = makeBtn("Save prompt", `${COLOR_ACCENT}24`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}55`);
-            updateBtn.dataset.action = "update";
-            updateBtn.onclick = async () => {
-                const isComposition = Boolean(selectedKey && compositionParts(presets[selectedKey]).length);
-                if (isComposition) {
-                    openComposition(selectedKey);
-                    return;
-                }
-                if (!selectedKey) {
-                    if (!textWidget.value.trim()) return;
-                    showNamePopup("SAVE NEW PROMPT", "New prompt", "Create", async newKey => {
-                        presets = await fetchPresets();
-                        if (presets[newKey]) { alert("A preset with that name already exists."); return false; }
-                        const result = await savePreset(newKey, textWidget.value);
-                        if (result.status !== "ok") { alert("Save failed: " + result.message); return false; }
-                        presets = await fetchPresets(); selectedKey = newKey; lastLoadedText = textWidget.value;
-                        persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true); return true;
-                    });
-                    return;
-                }
-                if (textWidget.value === lastLoadedText) return;
-                const result = await savePreset(selectedKey, textWidget.value);
-                if (result.status !== "ok") return alert("Update failed: " + result.message);
-                presets = await fetchPresets();
-                textWidget.value = resolvePresetText(selectedKey, presets);
-                lastLoadedText = textWidget.value;
-                updateLabel(); node.setDirtyCanvas(true);
+            // Thin transport wrappers over the /preset_loader endpoints, shared
+            // by the unified editor. Each throws on a non-ok response so the editor
+            // can surface the message.
+            const editorApi = {
+                save:         async (key, parts) => { const r = await savePreset(key, "", parts); if (r.status !== "ok") throw new Error(r.message); },
+                rename:       async (oldKey, newKey) => { const r = await presetAction("rename", { old_key: oldKey, new_key: newKey }); if (r.status !== "ok") throw new Error(r.message); },
+                remove:       async (key) => { const r = await deletePreset(key); if (r.status !== "ok") throw new Error(r.message); },
+                pin:          async (key, pinned) => { const r = await presetAction("pin", { key, pinned }); if (r.status !== "ok") throw new Error(r.message); },
+                setPreview:   async (key, file) => { const r = await uploadPreview(key, file); if (r.status !== "ok") throw new Error(r.message); },
+                clearPreview: async (key) => { const r = await clearPreview(key); if (r.status !== "ok") throw new Error(r.message); },
+                list:         async () => await fetchPresets(),
             };
 
-            const copyBtn = makeBtn("Save as", "transparent", "#4a4a64", "#b7bac5", COLOR_ACCENT, "#ffffff", "#252a34");
-            copyBtn.onclick = () => {
-                const suggested = selectedKey ? selectedKey + " copy" : "New preset";
-                showNamePopup("SAVE AS NEW PRESET", suggested, "Save copy", async newKey => {
-                    presets = await fetchPresets();
-                    if (presets[newKey]) { alert("A preset with that name already exists."); return false; }
-                    const result = selectedKey
-                        ? await presetAction("duplicate", { source_key: selectedKey, new_key: newKey })
-                        : await savePreset(newKey, textWidget.value);
-                    if (result.status !== "ok") { alert("Save failed: " + result.message); return false; }
-                    if (selectedKey && !compositionParts(presets[selectedKey]).length) {
-                        const textResult = await savePreset(newKey, textWidget.value);
-                        if (textResult.status !== "ok") { alert("Save failed: " + textResult.message); return false; }
-                    }
-                    presets = await fetchPresets(); selectedKey = newKey;
-                    textWidget.value = resolvePresetText(newKey, presets); lastLoadedText = textWidget.value;
-                    persistKey(); updateLabel(); updatePreview(); return true;
-                });
+            // Adding a reference part browses existing presets under Parts/, with a
+            // "+ New" that creates a reusable part and drops it straight into the
+            // composition — the same view (and capability) as "Manage parts".
+            const partPicker = (anchor, onPick) => openPresetPicker({
+                anchor, presets, mode: "parts", onSelect: onPick,
+                createAction: { label: "+ New", run: () => openPartCreator({
+                    presets, api: editorApi,
+                    onCreated: async (key) => {
+                        presets = await fetchPresets();
+                        if (selectedKey && presets[selectedKey]) { lastLoadedText = resolvePresetText(selectedKey, presets); textWidget.value = lastLoadedText; }
+                        updateLabel(); updatePreview(); node.setDirtyCanvas(true);
+                        onPick(key, presets[key]);
+                    },
+                }) },
+            });
+
+            // After editing the node's own preset, follow the saved key (or clear
+            // the selection when it was deleted) and refresh the read-only preview.
+            const followChange = async (savedKey) => {
+                presets = await fetchPresets();
+                selectedKey = savedKey && presets[savedKey] ? savedKey : null;
+                lastLoadedText = selectedKey ? resolvePresetText(selectedKey, presets) : null;
+                textWidget.value = lastLoadedText || "";
+                persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true);
             };
 
-            const openComposition = async (editingKey = null) => {
+            // After editing an arbitrary reusable part, keep the current selection
+            // but re-resolve it in case the edited part feeds into it.
+            const refreshChange = async () => {
                 presets = await fetchPresets();
-                openComposerModal({
-                    presets,
-                    editingKey,
-                    pickPreset: (anchor, onPick) => openPresetPicker({
-                        anchor, presets, mode: "parts", onSelect: onPick,
-                        createAction: { label: "+ New", run: () => editPart(null, (key, entry) => onPick(key, entry)) },
-                    }),
-                    save: async ({ oldKey, key, text, parts, editedPresets = [] }) => {
-                        for (const edited of editedPresets) {
-                            const partResult = await savePreset(edited.key, edited.text);
-                            if (partResult.status !== "ok") throw new Error(partResult.message);
-                        }
-                        if (oldKey && oldKey !== key) {
-                            const renamed = await presetAction("rename", { old_key: oldKey, new_key: key });
-                            if (renamed.status !== "ok") throw new Error(renamed.message);
-                        }
-                        const result = await savePreset(key, text, parts);
-                        if (result.status !== "ok") throw new Error(result.message);
-                        presets = await fetchPresets(); selectedKey = key;
-                        textWidget.value = resolvePresetText(key, presets); lastLoadedText = textWidget.value;
-                        persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true);
-                    },
-                });
+                if (selectedKey && !presets[selectedKey]) { selectedKey = null; persistKey(); }
+                lastLoadedText = selectedKey ? resolvePresetText(selectedKey, presets) : null;
+                textWidget.value = lastLoadedText || "";
+                updateLabel(); updatePreview(); node.setDirtyCanvas(true);
             };
 
-            const editPart = async (editingKey = null, onSaved = null) => {
+            // The single editor — for the node's own preset (follows selection)…
+            const openMainEditor = async (editingKey = null) => {
                 presets = await fetchPresets();
-                openPartModal({
-                    presets,
-                    editingKey,
-                    save: async ({ oldKey, key, text }) => {
-                        if (oldKey && oldKey !== key) {
-                            const renamed = await presetAction("rename", { old_key: oldKey, new_key: key });
-                            if (renamed.status !== "ok") throw new Error(renamed.message);
-                        }
-                        const result = await savePreset(key, text);
-                        if (result.status !== "ok") throw new Error(result.message);
-                        presets = await fetchPresets();
-                        if (selectedKey && presets[selectedKey]) {
-                            textWidget.value = resolvePresetText(selectedKey, presets);
-                            lastLoadedText = textWidget.value;
-                        }
-                        updateLabel(); node.setDirtyCanvas(true);
-                        onSaved?.(key, presets[key]);
-                    },
-                    remove: async key => {
-                        const result = await deletePreset(key);
-                        if (result.status !== "ok") throw new Error(result.message);
-                        presets = await fetchPresets();
-                    },
-                });
+                openPresetEditor({ presets, editingKey, api: editorApi, pickPreset: partPicker, onChanged: followChange });
+            };
+            // …and for reusable parts (leaves the node's selection alone).
+            const openPartEditor = async (editingKey = null) => {
+                presets = await fetchPresets();
+                openPresetEditor({ presets, editingKey, defaultKey: editingKey ? "" : "Parts/", api: editorApi, pickPreset: partPicker, onChanged: refreshChange });
             };
 
             const openPartsManager = async (anchor = newBtn) => {
                 presets = await fetchPresets();
                 openPresetPicker({
-                    anchor, presets, mode: "parts", onSelect: key => editPart(key),
-                    createAction: { label: "+ New", run: () => editPart() },
+                    anchor, presets, mode: "parts", onSelect: key => openPartEditor(key),
+                    createAction: { label: "+ New", run: () => openPartCreator({ presets, api: editorApi, onCreated: refreshChange }) },
                 });
             };
 
@@ -1088,15 +1052,23 @@ app.registerExtension({
                 }, true), 0);
             };
 
-            const openNewMenu = () => showActionMenu(newBtn, "pl-new-menu", [
-                { label: "New prompt", run: () => {
-                    if (textWidget.value.trim() && !confirm("Clear the current text and start a new prompt?")) return;
-                    selectedKey = null; lastLoadedText = null; textWidget.value = "";
-                    persistKey(); updateLabel(); updatePreview(); node.setDirtyCanvas(true);
-                } },
-                { label: "New composition", run: () => openComposition() },
-                { label: "New reusable part", run: () => editPart() },
-            ]);
+            // Primary action: open the unified editor for the current preset.
+            const editBtn = makeBtn("Edit", `${COLOR_ACCENT}24`, COLOR_ACCENT, COLOR_ACCENT, COLOR_ACCENT, "#ffffff", `${COLOR_ACCENT}55`);
+            editBtn.dataset.action = "edit";
+            editBtn.onclick = () => { if (selectedKey) openMainEditor(selectedKey); };
+
+            const dupBtn = makeBtn("Duplicate", "transparent", "#4a4a64", "#b7bac5", COLOR_ACCENT, "#ffffff", "#252a34");
+            dupBtn.dataset.action = "duplicate";
+            dupBtn.onclick = () => {
+                if (!selectedKey) return;
+                showNamePopup("DUPLICATE PRESET", selectedKey + " copy", "Duplicate", async newKey => {
+                    presets = await fetchPresets();
+                    if (presets[newKey]) { alert("A preset with that name already exists."); return false; }
+                    const result = await presetAction("duplicate", { source_key: selectedKey, new_key: newKey });
+                    if (result.status !== "ok") { alert("Duplicate failed: " + result.message); return false; }
+                    await followChange(newKey); return true;
+                });
+            };
 
             const moreBtn = makeBtn("", "transparent", "#4a4a64", "#a7abb7", COLOR_ACCENT, "#ffffff", "#252a34");
             moreBtn.innerHTML = iconSvg("more", 17);
@@ -1112,20 +1084,10 @@ app.registerExtension({
                     await presetAction("pin", { key: selectedKey, pinned: !presets[selectedKey]?.pinned });
                     presets = await fetchPresets(); updateLabel();
                 } } : null,
-                selectedKey ? { label: "Rename / move…", run: () => showNamePopup("RENAME OR MOVE PRESET", selectedKey, "Move", async newKey => {
-                    const result = await presetAction("rename", { old_key: selectedKey, new_key: newKey });
-                    if (result.status !== "ok") { alert(result.message); return false; }
-                    selectedKey = result.key; presets = await fetchPresets();
-                    lastLoadedText = resolvePresetText(selectedKey, presets) || textWidget.value;
-                    persistKey(); updateLabel(); updatePreview(); return true;
-                }) } : null,
-                selectedKey ? { label: "Delete preset…", danger: true, run: () => showDeletePopup(selectedKey, async () => {
-                    presets = await fetchPresets(); selectedKey = null; lastLoadedText = null;
-                    persistKey(); textWidget.value = ""; updateLabel(); updatePreview(); node.setDirtyCanvas(true);
-                }) } : null,
+                selectedKey ? { label: "Delete preset…", danger: true, run: () => showDeletePopup(selectedKey, () => followChange(null)) } : null,
             ]);
 
-            btnRow.append(updateBtn, copyBtn, moreBtn);
+            btnRow.append(editBtn, dupBtn, moreBtn);
             root.appendChild(btnRow);
 
             return root;
@@ -1268,23 +1230,21 @@ app.registerExtension({
 
         function updateLabel() {
             const label = uiWidget.element.querySelector("#pl-label");
-            const updateButton = uiWidget.element.querySelector('[data-action="update"]');
             const { color } = getThemeColors();
-            const isComposition = Boolean(selectedKey && compositionParts(presets[selectedKey]).length);
-            const dirty = Boolean(selectedKey && !isComposition && lastLoadedText !== null && textWidget.value !== lastLoadedText);
-            const hasDraft = Boolean(!selectedKey && textWidget.value.trim());
-            const canAct = isComposition || dirty || hasDraft;
-            if (updateButton) {
-                updateButton.textContent = isComposition ? "Edit composition" : selectedKey ? "Update" : "Save prompt";
-                updateButton.disabled = !canAct;
-                updateButton.style.opacity = canAct ? "1" : ".42";
-                updateButton.style.cursor = canAct ? "pointer" : "default";
-                updateButton.title = isComposition ? "Edit this composition" : selectedKey ? "Save changes to this preset" : "Save this text as a new prompt";
+            const has = Boolean(selectedKey);
+            // Edit and Duplicate act on the current selection, so disable them when
+            // nothing is selected (use the + button to start a new prompt).
+            for (const action of ["edit", "duplicate"]) {
+                const button = uiWidget.element.querySelector(`[data-action="${action}"]`);
+                if (!button) continue;
+                button.disabled = !has;
+                button.style.opacity = has ? "1" : ".42";
+                button.style.cursor = has ? "pointer" : "default";
             }
 
             if (!selectedKey) {
                 label.style.color = color;
-                label.innerHTML = hasDraft ? `<span style="color:${COLOR_PRESET_NAME};">Unsaved prompt</span>` : "— select a prompt —";
+                label.innerHTML = "— select a prompt —";
                 return;
             }
             const parts = selectedKey.split("/");
@@ -1295,8 +1255,8 @@ app.registerExtension({
                     : `<span style="color:${pathTone(p)};">${p}</span>`
             ).join(`<span style="color:#59606d;margin:0 3px;">/</span>`);
             const pin = presets[selectedKey]?.pinned ? `<span style="display:inline-flex;color:#ef88a7;margin-right:5px;vertical-align:middle;">${iconSvg("heart", 13)}</span>` : "";
-            const changed = dirty ? `<span title="Unsaved changes" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${COLOR_ACCENT};margin-left:7px;vertical-align:middle;"></span>` : "";
-            label.innerHTML = pin + pathHtml + changed;
+            const composed = isComposition(presets[selectedKey]) ? `<span title="Composition" style="display:inline-flex;color:${COLOR_ACCENT};margin-left:6px;vertical-align:middle;">${iconSvg("menu", 12)}</span>` : "";
+            label.innerHTML = pin + pathHtml + composed;
         }
 
         // ── THEME CHANGE OBSERVERS ──────────────────────────────────────────
@@ -1352,8 +1312,7 @@ app.registerExtension({
             document.getElementById("pl-dropdown")?.remove();
             document.getElementById("pl-active-tooltip")?.remove();
             document.getElementById("pl-actions-menu")?.remove();
-            const composerModal = document.getElementById("pl-composer-modal");
-            if (composerModal) composerModal.dismiss?.();
+            document.querySelectorAll(".pl-preset-editor").forEach(el => el.dismiss?.());
             originalRemoved?.apply(this, arguments);
         };
 

@@ -27,35 +27,34 @@ DATA_DIR.mkdir(exist_ok=True)
 PREVIEWS_DIR.mkdir(exist_ok=True)
 
 if not JSON_PATH.exists():
+    def _starter(text, preview):
+        # Unified model: every preset is an ordered list of parts.
+        return {
+            "parts": [{"text": text, "label": "Text", "enabled": True}],
+            "preview": preview, "preview_version": 1,
+        }
     starter = {
-        "Flux/Styles/oil_painting_aivazovsky": {
-            "text": "Oil on canvas painting in the style of Ivan Aivazovsky, characteristic thick brushstrokes and rich texture, deep navy and grey tones with golden highlights.",
-            "preview": "Flux_Styles_oil_painting_aivazovsky.jpg", "preview_version": 1
-        },
-        "Flux/Styles/post_impressionism_vangogh": {
-            "text": "Post-impressionism painting in the style of Vincent Van Gogh, swirling expressive brushstrokes, bold impasto texture, vivid contrasting colors.",
-            "preview": "Flux_Styles_post_impressionism_vangogh.jpg", "preview_version": 1
-        },
-        "Flux/Styles/frank_frazetta": {
-            "text": "Frank Frazetta fantasy illustration style, bold expressive brushstrokes, vivid dramatic colors.",
-            "preview": "Flux_Styles_frank_frazetta.jpg", "preview_version": 1
-        },
-        "Flux/Styles/edvard_munch_scream": {
-            "text": "Oil painting in the style of Edvard Munch's The Scream, expressionist style, muted warm and cold contrast, thick visible brushstrokes.",
-            "preview": "Flux_Styles_edvard_munch_scream.jpg", "preview_version": 1
-        },
-        "Flux/Styles/jack_kirby_comics": {
-            "text": "Comic art in the style of Jack Kirby, vibrant bold colors, iconic Kirby krackle energy effects, thick outlines, retro superhero aesthetic, dramatic perspective, flat cel-shaded coloring.",
-            "preview": "Flux_Styles_jack_kirby_comics.jpg", "preview_version": 1
-        },
-        "Flux/Styles/ukiyo_e": {
-            "text": "Ukiyo-e woodblock print style, bold black outlines, flat perspective, vibrant traditional colors, dynamic diagonal composition, asymmetrical arrangements, sense of movement and energy, decorative graphic elements, traditional Japanese aesthetic.",
-            "preview": "Flux_Styles_ukiyo_e.jpg", "preview_version": 1
-        },
-        "Flux/Styles/alphonse_mucha_artnouveau": {
-            "text": "Alphonse Mucha Art Nouveau style, flowing organic curvilinear lines, muted earthy pastel color palette, subtle watercolor-like textures, ornate decorative elements, intricate fine details, elegant poster composition, natural forms and curves, warm tactile feel.",
-            "preview": "Flux_Styles_alphonse_mucha_artnouveau.jpg", "preview_version": 1
-        },
+        "Flux/Styles/oil_painting_aivazovsky": _starter(
+            "Oil on canvas painting in the style of Ivan Aivazovsky, characteristic thick brushstrokes and rich texture, deep navy and grey tones with golden highlights.",
+            "Flux_Styles_oil_painting_aivazovsky.jpg"),
+        "Flux/Styles/post_impressionism_vangogh": _starter(
+            "Post-impressionism painting in the style of Vincent Van Gogh, swirling expressive brushstrokes, bold impasto texture, vivid contrasting colors.",
+            "Flux_Styles_post_impressionism_vangogh.jpg"),
+        "Flux/Styles/frank_frazetta": _starter(
+            "Frank Frazetta fantasy illustration style, bold expressive brushstrokes, vivid dramatic colors.",
+            "Flux_Styles_frank_frazetta.jpg"),
+        "Flux/Styles/edvard_munch_scream": _starter(
+            "Oil painting in the style of Edvard Munch's The Scream, expressionist style, muted warm and cold contrast, thick visible brushstrokes.",
+            "Flux_Styles_edvard_munch_scream.jpg"),
+        "Flux/Styles/jack_kirby_comics": _starter(
+            "Comic art in the style of Jack Kirby, vibrant bold colors, iconic Kirby krackle energy effects, thick outlines, retro superhero aesthetic, dramatic perspective, flat cel-shaded coloring.",
+            "Flux_Styles_jack_kirby_comics.jpg"),
+        "Flux/Styles/ukiyo_e": _starter(
+            "Ukiyo-e woodblock print style, bold black outlines, flat perspective, vibrant traditional colors, dynamic diagonal composition, asymmetrical arrangements, sense of movement and energy, decorative graphic elements, traditional Japanese aesthetic.",
+            "Flux_Styles_ukiyo_e.jpg"),
+        "Flux/Styles/alphonse_mucha_artnouveau": _starter(
+            "Alphonse Mucha Art Nouveau style, flowing organic curvilinear lines, muted earthy pastel color palette, subtle watercolor-like textures, ornate decorative elements, intricate fine details, elegant poster composition, natural forms and curves, warm tactile feel.",
+            "Flux_Styles_alphonse_mucha_artnouveau.jpg"),
     }
     JSON_PATH.write_text(json.dumps(starter, indent=2))
 
@@ -151,7 +150,13 @@ def normalize_parts(parts) -> list[dict]:
 
 
 def resolve_preset(key: str, presets: dict, stack=None) -> str:
-    """Resolve a composition to raw text; wildcard syntax is never parsed."""
+    """Resolve a preset to raw text; wildcard syntax is never parsed.
+
+    Every preset is an ordered list of parts. A part is either a *reference*
+    to another preset (``{"key": ...}``) or *inline text* (``{"text": ...}``).
+    Enabled parts are resolved in order and joined with blank lines. A bare
+    legacy ``text`` field (hand-edited JSON) is treated as a single inline part.
+    """
     stack = [] if stack is None else stack
     if key in stack:
         raise ValueError("Circular composition: " + " -> ".join(stack + [key]))
@@ -159,9 +164,9 @@ def resolve_preset(key: str, presets: dict, stack=None) -> str:
     if not isinstance(entry, dict):
         raise ValueError(f'Missing preset referenced by composition: "{key}"')
     parts = normalize_parts(entry.get("parts"))
-    own_text = str(entry.get("text", "")).strip()
     if not parts:
-        return own_text
+        # Backward-compat: a hand-edited entry with only a bare `text` field.
+        return str(entry.get("text", "")).strip()
     resolved = []
     for part in parts:
         if part["enabled"]:
@@ -169,8 +174,6 @@ def resolve_preset(key: str, presets: dict, stack=None) -> str:
                     if part.get("key") else part.get("text", "")).strip()
             if text:
                 resolved.append(text)
-    if own_text:
-        resolved.append(own_text)
     return "\n\n".join(resolved)
 
 
@@ -240,6 +243,10 @@ async def save_preset(request):
             presets  = load_presets()
             existing = presets.get(key, {})
             parts = normalize_parts(body.get("parts") if parts_supplied else existing.get("parts"))
+            # Unified model: content is always parts. A client that posts a bare
+            # `text` (e.g. a quick save) is canonicalised into a single inline part.
+            if not parts and text:
+                parts = [{"text": text, "label": "Text", "enabled": True}]
             if any(part.get("key") == key for part in parts):
                 return web.json_response({"status": "error", "message": "A composition cannot include itself"})
             missing = [part["key"] for part in parts if part.get("key") and part["key"] not in presets]
@@ -254,8 +261,6 @@ async def save_preset(request):
                 "updated_at":      utc_now(),
                 "last_used_at":    existing.get("last_used_at", None),
             }
-            if not parts:
-                entry["text"] = text
             presets[key] = entry
             resolve_preset(key, presets)
             save_presets(presets)

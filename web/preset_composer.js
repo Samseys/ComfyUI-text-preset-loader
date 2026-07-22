@@ -61,7 +61,7 @@ export function openPresetPicker({ anchor, presets, currentKey = null, onSelect,
     const navButton = (label, count, path, depth = 0) => { const button = element("button"); button.style.cssText = `width:100%;display:flex;align-items:center;gap:6px;padding:8px 8px 8px ${8 + depth * 12}px;border:0;border-radius:7px;background:${activeCategory === path ? "#88a8ff1c" : "transparent"};color:${activeCategory === path ? "#a9beff" : "#a9aebb"};cursor:pointer;text-align:left;font:11px inherit;`; const text = element("span", "", label); text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"; const badge = element("span", "", count); badge.style.cssText = "margin-left:auto;color:#6f7583;font-size:9px;"; button.append(text, badge); button.onclick = () => choose(path); return button; };
     const renderNav = () => { nav.replaceChildren(); const title = element("div", "", mode === "parts" ? "Part categories" : "Prompt categories"); title.style.cssText = "padding:5px 8px 8px;color:#737a88;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;"; nav.append(title, navButton(mode === "parts" ? "All parts" : "All prompts", keys.length, "@all")); for (const [path, count] of categories) nav.append(navButton(path.split("/").pop(), count, path, Math.min(2, path.split("/").length - 1))); };
     const renderCrumbs = () => { crumbs.replaceChildren(); const root = element("button", "", mode === "parts" ? "Parts" : "Prompts"); root.style.cssText = "border:0;background:transparent;color:#a9beff;padding:2px;cursor:pointer;"; root.onclick = () => choose("@all"); crumbs.append(root); if (activeCategory === "@all") return; let path = ""; for (const part of activeCategory.split("/")) { const slash = element("span", "", "/"); slash.style.color = "#555d6b"; path = path ? `${path}/${part}` : part; const target = path, button = element("button", "", part); button.style.cssText = `border:0;background:transparent;color:${pathTone(part)};padding:2px;cursor:pointer;`; button.onclick = () => choose(target); crumbs.append(slash, button); } };
-    const renderResults = () => { const query = search.value.trim().toLocaleLowerCase(); const matching = keys.filter(key => (activeCategory === "@all" || key.startsWith(activeCategory + "/")) && (!query || `${key} ${presets[key]?.text || ""}`.toLocaleLowerCase().includes(query))).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })); results.replaceChildren(); for (const key of matching) { const bits = key.split("/"), name = bits.pop(), button = element("button"); button.style.cssText = `width:100%;display:grid;gap:3px;padding:9px 10px;margin-bottom:3px;border:1px solid ${key === currentKey ? "#88a8ff55" : "transparent"};border-radius:8px;background:${key === currentKey ? "#88a8ff14" : "transparent"};color:#e4e7ed;text-align:left;cursor:pointer;`; const heading = element("strong", "", name); heading.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;"; const path = element("div"); path.style.cssText = "display:flex;gap:4px;overflow:hidden;white-space:nowrap;font-size:9px;"; bits.forEach((part, index) => { const crumb = element("span", "", part); crumb.style.color = pathTone(part); path.append(crumb); if (index < bits.length - 1) { const slash = element("span", "", "/"); slash.style.color = "#555d6b"; path.append(slash); } }); button.append(heading, path); button.onclick = () => { dismiss(); onSelect(key, presets[key]); }; results.append(button); } if (!matching.length) { const empty = element("div", "", mode === "parts" ? "No matching parts" : "No matching prompts"); empty.style.cssText = "padding:28px;color:#737a88;text-align:center;"; results.append(empty); } };
+    const renderResults = () => { const query = search.value.trim().toLocaleLowerCase(); const matching = keys.filter(key => (activeCategory === "@all" || key.startsWith(activeCategory + "/")) && (!query || `${key} ${normalizeParts(presets[key]).map(p => p.key || p.text || "").join(" ")}`.toLocaleLowerCase().includes(query))).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })); results.replaceChildren(); for (const key of matching) { const bits = key.split("/"), name = bits.pop(), button = element("button"); button.style.cssText = `width:100%;display:grid;gap:3px;padding:9px 10px;margin-bottom:3px;border:1px solid ${key === currentKey ? "#88a8ff55" : "transparent"};border-radius:8px;background:${key === currentKey ? "#88a8ff14" : "transparent"};color:#e4e7ed;text-align:left;cursor:pointer;`; const heading = element("strong", "", name); heading.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;"; const path = element("div"); path.style.cssText = "display:flex;gap:4px;overflow:hidden;white-space:nowrap;font-size:9px;"; bits.forEach((part, index) => { const crumb = element("span", "", part); crumb.style.color = pathTone(part); path.append(crumb); if (index < bits.length - 1) { const slash = element("span", "", "/"); slash.style.color = "#555d6b"; path.append(slash); } }); button.append(heading, path); button.onclick = () => { dismiss(); onSelect(key, presets[key]); }; results.append(button); } if (!matching.length) { const empty = element("div", "", mode === "parts" ? "No matching parts" : "No matching prompts"); empty.style.cssText = "padding:28px;color:#737a88;text-align:center;"; results.append(empty); } };
     const render = () => { renderNav(); renderCrumbs(); renderResults(); };
     search.oninput = renderResults; render();
     const rect = anchor?.getBoundingClientRect?.() || { left: 12, bottom: 12, top: 12, right: 572 };
@@ -85,22 +85,40 @@ export function normalizeParts(entry) {
 }
 
 export function presetKind(key, entry) {
-    if (normalizeParts(entry).length) return "composition";
-    if (key.startsWith("Parts/")) return "part";
-    return "prompt";
+    // Unified model: content is always parts. "part" vs "prompt" is now purely a
+    // namespace convention (Parts/ = meant to be reused inside other presets).
+    return key.startsWith("Parts/") ? "part" : "prompt";
+}
+
+// A preset is a "composition" (for badge/display purposes only) when it pulls in
+// at least one other preset by reference. A preset made only of inline text is
+// just a plain prompt, regardless of how many text blocks it has.
+export function isComposition(entry) {
+    return normalizeParts(entry).some(part => part.key);
+}
+
+// Editable inline text for a preset that is a single inline-text part (or empty).
+// Returns null for a multi-part composition — those are edited on their own,
+// not inline from a parent, so a parent editor shows them read-only.
+export function simpleLeafText(entry) {
+    const parts = normalizeParts(entry);
+    if (parts.length === 0) return "";
+    if (parts.length === 1 && !parts[0].key) return parts[0].text || "";
+    return null;
 }
 
 export function resolvePreset(key, presets, stack = []) {
     if (stack.includes(key)) throw new Error(`Circular composition: ${[...stack, key].join(" -> ")}`);
     const entry = presets[key];
     if (!entry) throw new Error(`Missing preset: ${key}`);
-    const chunks = normalizeParts(entry)
+    const parts = normalizeParts(entry);
+    // Backward-compat: a hand-edited entry with only a bare `text` field.
+    if (!parts.length) return String(entry.text || "").trim();
+    return parts
         .filter(part => part.enabled)
         .map(part => (part.key ? resolvePreset(part.key, presets, [...stack, key]) : part.text).trim())
-        .filter(Boolean);
-    const own = String(entry.text || "").trim();
-    if (own) chunks.push(own);
-    return chunks.join("\n\n");
+        .filter(Boolean)
+        .join("\n\n");
 }
 
 // crypto.randomUUID() only exists in secure contexts (HTTPS/localhost). Phones
@@ -111,6 +129,10 @@ function uid() {
     return `${Date.now().toString(36)}-${(uidCounter++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// Monotonic depth so preset editors can stack (e.g. creating a new reusable part
+// while composing) — each layer sits above the previous one and closes on its own.
+let editorDepth = 0;
+
 function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -118,7 +140,7 @@ function element(tag, className, text) {
     return node;
 }
 
-export function createPartsEditor({ presets, initialParts = [], excludeKey = null, getOwnText, onChange = () => {}, pickPreset = null }) {
+export function createPartsEditor({ presets, initialParts = [], excludeKey = null, onChange = () => {}, pickPreset = null }) {
     let parts = initialParts.map(part => ({ ...part }));
     const editedPresets = new Map();
     presets = Object.fromEntries(Object.entries(presets).map(([key, entry]) => [key, { ...entry }]));
@@ -163,7 +185,6 @@ export function createPartsEditor({ presets, initialParts = [], excludeKey = nul
     function updatePreview() {
         try {
             const chunks = parts.filter(part => part.enabled).map(part => (part.key ? resolvePreset(part.key, presets) : part.text).trim()).filter(Boolean);
-            const own = String(getOwnText?.() || "").trim(); if (own) chunks.push(own);
             preview.textContent = chunks.join("\n\n") || "The combined raw prompt appears here.";
         } catch (error) { preview.textContent = error.message; }
     }
@@ -244,14 +265,30 @@ export function createPartsEditor({ presets, initialParts = [], excludeKey = nul
                 const name = element("div"); name.style.cssText = "display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;white-space:nowrap;font-size:11px;";
                 keyParts.forEach((segment, i) => { const crumb = element("span", "", segment); crumb.style.color = pathTone(segment); name.append(crumb); if (i < keyParts.length - 1) { const slash = element("span", "", "/"); slash.style.color = "#555d6b"; name.append(slash); } });
                 const title = element("strong", "", leaf); title.style.cssText = "display:block;overflow:hidden;text-overflow:ellipsis;color:#e4e7ed;font-size:12px;";
-                const text = element("textarea"); text.value = editedPresets.get(part.key) ?? presets[part.key]?.text ?? ""; text.placeholder = "Reusable part text";
-                text.style.cssText = "width:100%;min-height:120px;resize:vertical;border:1px solid #2f3440;border-radius:8px;background:#0f1116;color:#e1e3e9;padding:8px;box-sizing:border-box;outline:none;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;";
-                text.oninput = () => {
-                    editedPresets.set(part.key, text.value);
-                    if (presets[part.key]) presets[part.key].text = text.value;
-                    onChange(); updatePreview();
-                };
-                content.append(name, title, text);
+                const editable = editedPresets.has(part.key)
+                    ? (editedPresets.get(part.key)[0]?.text ?? "")
+                    : simpleLeafText(presets[part.key]);
+                if (editable !== null) {
+                    // The referenced preset is a single block of text — edit it in place.
+                    const text = element("textarea"); text.value = editable; text.placeholder = "Reusable part text";
+                    text.style.cssText = "width:100%;min-height:120px;resize:vertical;border:1px solid #2f3440;border-radius:8px;background:#0f1116;color:#e1e3e9;padding:8px;box-sizing:border-box;outline:none;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;";
+                    text.oninput = () => {
+                        const nextParts = text.value.trim() ? [{ text: text.value, label: "Text", enabled: true }] : [];
+                        editedPresets.set(part.key, nextParts);
+                        if (presets[part.key]) presets[part.key] = { ...presets[part.key], parts: nextParts };
+                        onChange(); updatePreview();
+                    };
+                    content.append(name, title, text);
+                } else {
+                    // The referenced preset is itself a composition — show its resolved
+                    // output read-only; it is edited on its own, not from here.
+                    const note = element("div", "", "Composition — open it separately to change its parts.");
+                    note.style.cssText = "color:#747c8c;font-size:10px;";
+                    const resolved = element("pre");
+                    resolved.style.cssText = "margin:0;max-height:120px;overflow:auto;padding:8px;white-space:pre-wrap;color:#aeb4c0;background:#0f1116;border:1px solid #2f3440;border-radius:8px;font:11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;";
+                    try { resolved.textContent = resolvePreset(part.key, presets); } catch (error) { resolved.textContent = error.message; }
+                    content.append(name, title, note, resolved);
+                }
             } else {
                 const label = element("input"); label.value = part.label || "Custom"; label.title = "Part label";
                 const text = element("textarea"); text.value = part.text || ""; text.placeholder = "Custom prompt text";
@@ -295,84 +332,237 @@ export function createPartsEditor({ presets, initialParts = [], excludeKey = nul
     return {
         element: root,
         getParts: () => parts.map(part => ({ ...part })),
-        getEditedPresets: () => [...editedPresets].map(([key, text]) => ({ key, text })),
+        getEditedPresets: () => [...editedPresets].map(([key, parts]) => ({ key, parts })),
         refresh: render,
     };
 }
 
-export async function openComposerModal({ presets, editingKey = null, save, pickPreset = null }) {
-    document.getElementById("pl-composer-modal")?.dismiss?.();
-    const existing = editingKey ? presets[editingKey] : null;
-    const overlay = element("div"); overlay.id = "pl-composer-modal";
-    overlay.style.cssText = "position:fixed;inset:0;z-index:10020;display:grid;place-items:center;padding:24px;background:#050609b8;backdrop-filter:blur(7px);";
-    const panel = element("section"); panel.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:min(860px,96vw);max-height:92vh;overflow:hidden;border:1px solid #343945;border-radius:18px;background:#17191f;color:#eef0f4;box-shadow:0 30px 100px #000c;font:13px/1.45 Inter,system-ui,sans-serif;";
-    const header = element("header"); header.style.cssText = "display:flex;align-items:center;padding:18px 20px;border-bottom:1px solid #2a2e38;";
-    header.append(element("strong", "", existing ? "Edit composition" : "New composition"));
-    const close = element("button"); close.innerHTML = iconSvg("x", 18); close.style.cssText = "margin-left:auto;width:36px;height:36px;display:grid;place-items:center;padding:0;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;cursor:pointer;"; header.append(close);
-    const body = element("div"); body.style.cssText = "overflow:auto;padding:20px;";
-    const label = text => { const node = element("label", "", text); node.style.cssText = "display:block;margin:0 0 6px;color:#9aa1af;font-size:12px;"; return node; };
-    const name = element("input"); name.value = editingKey || ""; name.placeholder = "Compositions/Anime portrait";
-    name.style.cssText = "width:100%;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:11px 12px;outline:none;box-sizing:border-box;";
-    body.append(label("Composition name"), name, label("Ordered parts"));
-    const initialParts = normalizeParts(existing);
-    if (existing?.text?.trim()) initialParts.push({ text: existing.text, label: "Legacy text", enabled: true });
-    const editor = createPartsEditor({ presets, initialParts, excludeKey: editingKey, getOwnText: () => "", pickPreset });
-    body.append(editor.element);
-    const footer = element("footer"); footer.style.cssText = "display:flex;justify-content:flex-end;gap:9px;padding:14px 20px;border-top:1px solid #2a2e38;";
-    const cancel = element("button", "", "Cancel"), submit = element("button", "", existing ? "Update composition" : "Create composition");
-    for (const button of [cancel, submit]) button.style.cssText = "min-height:40px;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;padding:0 15px;cursor:pointer;";
-    submit.style.cssText += "background:#88a8ff;border-color:#88a8ff;color:#10131a;font-weight:700;";
-    footer.append(cancel, submit); panel.append(header, body, footer); overlay.append(panel); document.body.append(overlay);
-    const dismiss = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
-    const onKey = event => { if (event.key === "Escape") dismiss(); };
-    overlay.dismiss = dismiss; close.onclick = cancel.onclick = dismiss; overlay.onclick = event => { if (event.target === overlay) dismiss(); }; document.addEventListener("keydown", onKey);
-    submit.onclick = async () => {
-        const key = name.value.trim(); if (!key) { name.setCustomValidity("Enter a composition name"); name.reportValidity(); return; }
-        if (!editingKey && presets[key]) { name.setCustomValidity("A preset with this name already exists"); name.reportValidity(); return; }
-        submit.disabled = true;
-        try { await save({ oldKey: editingKey, key, text: "", parts: editor.getParts(), editedPresets: editor.getEditedPresets() }); dismiss(); }
-        catch (error) { alert(error.message); submit.disabled = false; }
+// Existing category paths (each ending in "/") derived from preset keys, for
+// name autocomplete. `onlyParts` restricts to the Parts/ tree.
+function categoryPaths(presets, onlyParts = false) {
+    const set = new Set();
+    for (const key of Object.keys(presets)) {
+        if (onlyParts && !key.startsWith("Parts/")) continue;
+        const segments = key.split("/"); segments.pop();
+        let path = "";
+        for (const segment of segments) { path = path ? `${path}/${segment}` : segment; set.add(path + "/"); }
+    }
+    return [...set].sort();
+}
+
+// Wrap a name input with a compact, in-modal category-suggestion dropdown that
+// only appears while typing (a native <datalist> renders oversized in the
+// desktop app and covers the field below). Returns the wrapper to insert.
+function attachCategorySuggest(input, categories) {
+    const wrap = element("div"); wrap.style.cssText = "position:relative;";
+    const suggest = element("div"); suggest.style.cssText = "position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:5;max-height:168px;overflow:auto;background:#101216;border:1px solid #343945;border-radius:10px;box-shadow:0 16px 40px #000a;display:none;";
+    wrap.append(input, suggest);
+    const render = () => {
+        const query = input.value.trim().toLocaleLowerCase();
+        const matches = categories.filter(category => category.toLocaleLowerCase() !== query && category.toLocaleLowerCase().includes(query)).slice(0, 8);
+        suggest.replaceChildren();
+        if (!matches.length) { suggest.style.display = "none"; return; }
+        for (const category of matches) {
+            const row = element("button", "", category); row.type = "button";
+            row.style.cssText = "display:block;width:100%;text-align:left;border:0;background:transparent;color:#cbd0dc;padding:8px 11px;cursor:pointer;font:12px inherit;";
+            row.onmousedown = event => { event.preventDefault(); input.value = category; suggest.style.display = "none"; input.focus(); input.setSelectionRange(category.length, category.length); };
+            row.onmouseenter = () => row.style.background = "#20232b";
+            row.onmouseleave = () => row.style.background = "transparent";
+            suggest.append(row);
+        }
+        suggest.style.display = "block";
     };
-    setTimeout(() => name.focus(), 0);
+    input.addEventListener("input", render);
+    input.addEventListener("blur", () => setTimeout(() => { suggest.style.display = "none"; }, 120));
+    input.addEventListener("keydown", event => { if (event.key === "Escape" && suggest.style.display === "block") { event.stopPropagation(); suggest.style.display = "none"; } });
+    return wrap;
+}
+
+// The single preset editor, shared by the canvas node and the /browse page.
+// Every preset — plain prompt, composition, or reusable part — is edited here:
+// a name, an ordered list of parts (references + inline text), a resolved-output
+// preview, a preview image, and pin/delete. `api` decouples it from transport so
+// both callers reuse it against the same /preset_loader endpoints.
+//
+//   api.save(key, parts)   api.rename(oldKey, newKey)   api.remove(key)
+//   api.pin(key, pinned)   api.setPreview(key, file)    api.clearPreview(key)
+//   api.list() -> presets  api.notify?(message)
+//
+// `onChanged(key|null)` fires after any successful mutation so the caller can
+// follow the selection (null after a delete).
+export async function openPresetEditor({ presets, editingKey = null, initialParts = null, defaultKey = "", closeOnSave = false, api, pickPreset = null, onChanged = null }) {
+    const depth = editorDepth++;
+    let working = presets;
+    let currentKey = editingKey;
+
+    const overlay = element("div"); overlay.id = `pl-preset-editor-${depth}`; overlay.className = "pl-preset-editor";
+    overlay.style.cssText = `position:fixed;inset:0;z-index:${10020 + depth * 4};display:grid;place-items:center;padding:24px;background:#050609b8;backdrop-filter:blur(7px);`;
+    const panel = element("section"); panel.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:min(880px,96vw);max-height:92vh;overflow:hidden;border:1px solid #343945;border-radius:18px;background:#17191f;color:#eef0f4;box-shadow:0 30px 100px #000c;font:13px/1.45 Inter,system-ui,sans-serif;";
+
+    const header = element("header"); header.style.cssText = "display:flex;align-items:center;padding:18px 20px;border-bottom:1px solid #2a2e38;";
+    const titleEl = element("strong", "", editingKey ? "Edit preset" : "New preset"); header.append(titleEl);
+    const close = element("button"); close.innerHTML = iconSvg("x", 18); close.style.cssText = "margin-left:auto;width:36px;height:36px;display:grid;place-items:center;padding:0;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;cursor:pointer;"; header.append(close);
+
+    const body = element("div"); body.style.cssText = "overflow:auto;padding:20px;display:grid;gap:14px;";
+    const label = text => { const node = element("label", "", text); node.style.cssText = "display:block;margin:0 0 6px;color:#9aa1af;font-size:12px;"; return node; };
+    const name = element("input"); name.value = editingKey || defaultKey || ""; name.placeholder = "Characters/Heroes/example";
+    name.style.cssText = "width:100%;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:11px 12px;outline:none;box-sizing:border-box;";
+    const nameHint = element("div", "", "Use / to nest into categories. A Parts/… name marks a reusable part."); nameHint.style.cssText = "margin-top:-8px;color:#747b89;font-size:11px;";
+
+    // New presets open with one focused inline-text row so the common case
+    // (a single block of prompt text) is still just "type · name · save".
+    let startParts;
+    if (editingKey) {
+        startParts = normalizeParts(presets[editingKey]);
+        // Safety net for a hand-edited / legacy bare-text entry: seed one inline part.
+        if (!startParts.length && presets[editingKey]?.text) startParts = [{ text: presets[editingKey].text, label: "Text", enabled: true }];
+    } else {
+        startParts = initialParts && initialParts.length ? initialParts : [{ text: "", label: "Text", enabled: true }];
+    }
+    const editor = createPartsEditor({ presets: working, initialParts: startParts, excludeKey: editingKey, pickPreset });
+
+    const media = element("div");
+    const fileInput = element("input"); fileInput.type = "file"; fileInput.accept = "image/*"; fileInput.style.display = "none";
+
+    const nameGroup = element("div"); nameGroup.append(label("Preset name"), attachCategorySuggest(name, categoryPaths(working)), nameHint);
+    const partsGroup = element("div"); partsGroup.append(label("Parts"), editor.element);
+    body.append(nameGroup, partsGroup, media, fileInput);
+
+    const footer = element("footer"); footer.style.cssText = "display:flex;align-items:center;gap:9px;padding:14px 20px;border-top:1px solid #2a2e38;";
+    const pinBtn = element("button", "", "Pin"); const delBtn = element("button", "", "Delete");
+    const spacer = element("div"); spacer.style.flex = "1";
+    const cancel = element("button", "", "Cancel"), submit = element("button", "", "Save preset");
+    for (const button of [pinBtn, delBtn, cancel, submit]) button.style.cssText = "min-height:40px;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;padding:0 15px;cursor:pointer;";
+    delBtn.style.cssText += "border-color:#59353a;background:#24171a;color:#ee858b;";
+    submit.style.cssText += "background:#88a8ff;border-color:#88a8ff;color:#10131a;font-weight:700;";
+    footer.append(pinBtn, delBtn, spacer, cancel, submit);
+    panel.append(header, body, footer); overlay.append(panel); document.body.append(overlay);
+
+    const dismiss = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    // Escape only closes the topmost editor in the stack.
+    const onKey = event => {
+        if (event.key !== "Escape") return;
+        const all = document.querySelectorAll(".pl-preset-editor");
+        if (all[all.length - 1] === overlay) dismiss();
+    };
+    overlay.dismiss = dismiss; close.onclick = cancel.onclick = dismiss;
+    overlay.onclick = event => { if (event.target === overlay) dismiss(); };
+    document.addEventListener("keydown", onKey);
+
+    function renderMedia() {
+        media.replaceChildren();
+        const box = element("div"); box.style.cssText = "height:180px;background:#0d0f13;border:1px solid #2a2e38;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;";
+        if (!currentKey) {
+            const hint = element("span", "", "Save the preset to add a preview image."); hint.style.cssText = "color:#747b89;font-size:11px;";
+            box.append(hint); media.append(label("Preview"), box); return;
+        }
+        const preset = working[currentKey] || {};
+        if (preset.preview) {
+            const image = element("img"); image.src = `/preset_loader/preview/${encodeURIComponent(preset.preview)}?v=${preset.preview_version || 0}`;
+            image.style.cssText = "width:100%;height:100%;object-fit:contain;"; box.append(image);
+        } else { const hint = element("span", "", "No preview image"); hint.style.cssText = "color:#555c69;font-size:12px;"; box.append(hint); }
+        const actions = element("div"); actions.style.cssText = "display:flex;gap:9px;margin-top:9px;";
+        const choose = element("button", "", "Choose preview"); choose.style.cssText = "min-height:36px;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;padding:0 13px;cursor:pointer;";
+        choose.onclick = () => fileInput.click(); actions.append(choose);
+        if (preset.preview) {
+            const remove = element("button", "", "Remove"); remove.style.cssText = choose.style.cssText;
+            remove.onclick = async () => { try { await api.clearPreview(currentKey); working = await api.list(); renderMedia(); onChanged?.(currentKey); } catch (error) { alert(error.message); } };
+            actions.append(remove);
+        }
+        media.append(label("Preview"), box, actions);
+    }
+    fileInput.onchange = async () => {
+        const file = fileInput.files[0]; if (!file || !currentKey) return;
+        try { await api.setPreview(currentKey, file); working = await api.list(); renderMedia(); onChanged?.(currentKey); }
+        catch (error) { alert(error.message); }
+        fileInput.value = "";
+    };
+
+    function renderActions() {
+        pinBtn.style.display = currentKey ? "" : "none";
+        delBtn.style.display = currentKey ? "" : "none";
+        if (currentKey) pinBtn.textContent = working[currentKey]?.pinned ? "Unpin" : "Pin";
+    }
+    pinBtn.onclick = async () => {
+        if (!currentKey) return;
+        try { await api.pin(currentKey, !working[currentKey]?.pinned); working = await api.list(); renderActions(); onChanged?.(currentKey); }
+        catch (error) { alert(error.message); }
+    };
+    delBtn.onclick = async () => {
+        if (!currentKey || !confirm(`Delete "${currentKey}" permanently?`)) return;
+        try { await api.remove(currentKey); onChanged?.(null); dismiss(); }
+        catch (error) { alert(error.message); }
+    };
+
+    submit.onclick = async () => {
+        const key = name.value.trim();
+        if (!key) { name.setCustomValidity("Enter a preset name"); name.reportValidity(); return; }
+        if (key !== currentKey && working[key]) { name.setCustomValidity("A preset with that name already exists"); name.reportValidity(); return; }
+        name.setCustomValidity(""); submit.disabled = true;
+        try {
+            for (const edited of editor.getEditedPresets()) await api.save(edited.key, edited.parts);
+            if (currentKey && key !== currentKey) await api.rename(currentKey, key);
+            await api.save(key, editor.getParts());
+            working = await api.list();
+            currentKey = key;
+            titleEl.textContent = "Edit preset";
+            await onChanged?.(key);
+            api.notify?.("Preset saved");
+            // Create-and-add flow (e.g. a new reusable part from a composition):
+            // close this layer once saved so focus returns to the parent editor.
+            if (closeOnSave) { dismiss(); return; }
+            renderMedia(); renderActions();
+        } catch (error) { alert(error.message); }
+        submit.disabled = false;
+    };
+
+    renderMedia(); renderActions();
+    setTimeout(() => { if (editingKey) name.focus(); else { const ta = editor.element.querySelector("textarea"); (ta || name).focus(); } }, 30);
     return overlay;
 }
 
-export async function openPartModal({ presets, editingKey = null, save, remove = null }) {
-    document.getElementById("pl-part-modal")?.dismiss?.();
-    const existing = editingKey ? presets[editingKey] : null;
-    const overlay = element("div"); overlay.id = "pl-part-modal";
-    overlay.style.cssText = "position:fixed;inset:0;z-index:10022;display:grid;place-items:center;padding:24px;background:#050609b8;backdrop-filter:blur(7px);";
-    const panel = element("section"); panel.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:min(680px,96vw);max-height:90vh;overflow:hidden;border:1px solid #343945;border-radius:18px;background:#17191f;color:#eef0f4;box-shadow:0 30px 100px #000c;font:13px/1.45 Inter,system-ui,sans-serif;";
+// A reusable part is just a block of text, so creating one is a lean name + text
+// box — no parts list, preview, or pin. Stacks over an open editor (via the shared
+// .pl-preset-editor class) so it can create-and-add mid-composition. On success it
+// saves the part as a single inline-text part and calls onCreated(key).
+export function openPartCreator({ presets, defaultKey = "Parts/", api, onCreated = null }) {
+    const depth = editorDepth++;
+    const overlay = element("div"); overlay.id = `pl-part-creator-${depth}`; overlay.className = "pl-preset-editor";
+    overlay.style.cssText = `position:fixed;inset:0;z-index:${10020 + depth * 4};display:grid;place-items:center;padding:24px;background:#050609b8;backdrop-filter:blur(7px);`;
+    const panel = element("section"); panel.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr) auto;width:min(640px,96vw);max-height:88vh;overflow:hidden;border:1px solid #343945;border-radius:18px;background:#17191f;color:#eef0f4;box-shadow:0 30px 100px #000c;font:13px/1.45 Inter,system-ui,sans-serif;";
     const header = element("header"); header.style.cssText = "display:flex;align-items:center;padding:18px 20px;border-bottom:1px solid #2a2e38;";
-    header.append(element("strong", "", existing ? "Edit reusable part" : "New reusable part"));
+    header.append(element("strong", "", "New reusable part"));
     const close = element("button"); close.innerHTML = iconSvg("x", 18); close.style.cssText = "margin-left:auto;width:36px;height:36px;display:grid;place-items:center;padding:0;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;cursor:pointer;"; header.append(close);
     const body = element("div"); body.style.cssText = "overflow:auto;padding:20px;";
     const makeLabel = text => { const node = element("label", "", text); node.style.cssText = "display:block;margin:0 0 6px;color:#9aa1af;font-size:12px;"; return node; };
-    const name = element("input"); name.value = editingKey || "Parts/"; name.placeholder = "Parts/Camera/Close-up";
+    const name = element("input"); name.value = defaultKey; name.placeholder = "Parts/Camera/Close-up";
     name.style.cssText = "width:100%;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:11px 12px;outline:none;box-sizing:border-box;";
-    const hint = element("div", "", "Reusable parts live under Parts/ and can be inserted into any composed prompt."); hint.style.cssText = "margin:6px 0 16px;color:#747b89;font-size:11px;";
-    const text = element("textarea"); text.value = existing?.text || ""; text.placeholder = "Prompt fragment or wildcard block…";
-    text.style.cssText = "display:block;width:100%;min-height:260px;resize:vertical;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:12px;outline:none;box-sizing:border-box;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;";
-    body.append(makeLabel("Part name"), name, hint, makeLabel("Prompt text"), text);
-    const footer = element("footer"); footer.style.cssText = "display:flex;align-items:center;justify-content:flex-end;gap:9px;padding:14px 20px;border-top:1px solid #2a2e38;";
-    const cancel = element("button", "", "Cancel"), submit = element("button", "", existing ? "Update part" : "Create part");
+    // Suggest existing Parts/ category paths as you type.
+    const nameWrap = attachCategorySuggest(name, categoryPaths(presets, true));
+    const hint = element("div", "", "Reusable parts live under Parts/ and can be inserted into any prompt."); hint.style.cssText = "margin:6px 0 14px;color:#747b89;font-size:11px;";
+    const text = element("textarea"); text.placeholder = "Prompt fragment or wildcard block…";
+    text.style.cssText = "display:block;width:100%;min-height:240px;resize:vertical;border:1px solid #343945;border-radius:10px;background:#111318;color:#eef0f4;padding:12px;outline:none;box-sizing:border-box;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;";
+    body.append(makeLabel("Part name"), nameWrap, hint, makeLabel("Text"), text);
+    const footer = element("footer"); footer.style.cssText = "display:flex;justify-content:flex-end;gap:9px;padding:14px 20px;border-top:1px solid #2a2e38;";
+    const cancel = element("button", "", "Cancel"), submit = element("button", "", "Create part");
     for (const button of [cancel, submit]) button.style.cssText = "min-height:40px;border:1px solid #343945;border-radius:10px;background:#20232b;color:#eef0f4;padding:0 15px;cursor:pointer;";
-    if (existing && remove) { const del = element("button", "", "Delete"); del.style.cssText = "min-height:40px;margin-right:auto;border:1px solid #59353a;border-radius:10px;background:#24171a;color:#ee858b;padding:0 15px;cursor:pointer;"; del.onclick = async () => { if (!confirm(`Delete ${editingKey}?`)) return; del.disabled = true; try { await remove(editingKey); dismiss(); } catch (error) { alert(error.message); del.disabled = false; } }; footer.append(del); }
     submit.style.cssText += "background:#88a8ff;border-color:#88a8ff;color:#10131a;font-weight:700;";
     footer.append(cancel, submit); panel.append(header, body, footer); overlay.append(panel); document.body.append(overlay);
     const dismiss = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
-    const onKey = event => { if (event.key === "Escape") dismiss(); };
-    overlay.dismiss = dismiss; close.onclick = cancel.onclick = dismiss; overlay.onclick = event => { if (event.target === overlay) dismiss(); }; document.addEventListener("keydown", onKey);
+    const onKey = event => { if (event.key !== "Escape") return; const all = document.querySelectorAll(".pl-preset-editor"); if (all[all.length - 1] === overlay) dismiss(); };
+    overlay.dismiss = dismiss; close.onclick = cancel.onclick = dismiss;
+    overlay.onclick = event => { if (event.target === overlay) dismiss(); };
+    document.addEventListener("keydown", onKey);
     submit.onclick = async () => {
         let key = name.value.trim().replace(/^\/+/, "");
         if (!key.toLocaleLowerCase().startsWith("parts/")) key = `Parts/${key}`;
         name.value = key;
-        if (key === "Parts/" || !text.value.trim()) { name.setCustomValidity(key === "Parts/" ? "Enter a part name" : "Enter prompt text"); name.reportValidity(); return; }
-        if (!editingKey && presets[key]) { name.setCustomValidity("A preset with this name already exists"); name.reportValidity(); return; }
+        if (key === "Parts/" || !text.value.trim()) { name.setCustomValidity(key === "Parts/" ? "Enter a part name" : "Enter text"); name.reportValidity(); return; }
+        if (presets[key]) { name.setCustomValidity("A preset with that name already exists"); name.reportValidity(); return; }
         name.setCustomValidity(""); submit.disabled = true;
-        try { await save({ oldKey: editingKey, key, text: text.value }); dismiss(); }
+        try { await api.save(key, [{ text: text.value, label: "Text", enabled: true }]); await onCreated?.(key); dismiss(); }
         catch (error) { alert(error.message); submit.disabled = false; }
     };
-    setTimeout(() => { name.focus(); name.setSelectionRange(name.value.length, name.value.length); }, 0);
+    setTimeout(() => { name.focus(); name.setSelectionRange(name.value.length, name.value.length); }, 30);
     return overlay;
 }
