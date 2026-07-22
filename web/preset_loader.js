@@ -6,7 +6,8 @@ import { app } from "../../scripts/app.js";
 import { presetApi } from "./preset_api.js";
 import { loadPresets, subscribePresets } from "./preset_store.js";
 import { resolvePreset as resolvePresetText, isComposition, validateKey } from "./preset_model.js";
-import { openPresetEditor, openPartCreator, openPresetPicker } from "./preset_composer.js";
+import { openPresetEditor, openPartCreator } from "./preset_editor.js";
+import { openPresetPicker } from "./preset_picker.js";
 import { confirmDialog, openPopover, promptDialog } from "./preset_dialog.js";
 import { iconSvg, pathTone } from "./preset_icons.js";
 

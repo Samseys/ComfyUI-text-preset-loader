@@ -3,15 +3,12 @@ import {
     resolvePreset,
     presetKind,
     isComposition,
-} from "/preset_loader/assets/preset_model.js";
-import {
-    openPresetEditor,
-    openPartCreator,
-    openPresetPicker,
-} from "/preset_loader/assets/preset_composer.js";
-import { iconSvg, pathTone } from "/preset_loader/assets/preset_icons.js";
-import { presetApi } from "/preset_loader/assets/preset_api.js";
-import { loadPresets, subscribePresets } from "/preset_loader/assets/preset_store.js";
+} from "./preset_model.js";
+import { openPresetEditor, openPartCreator } from "./preset_editor.js";
+import { openPresetPicker } from "./preset_picker.js";
+import { iconSvg, pathTone } from "./preset_icons.js";
+import { presetApi } from "./preset_api.js";
+import { loadPresets, subscribePresets } from "./preset_store.js";
 
 const $ = selector => document.querySelector(selector);
 const PAGE_SIZE = 48;
@@ -68,11 +65,11 @@ function applySort() {
 
 function categoryMatches(row) {
     const entry = presets[row.key];
-    if (activeCategory === "@prompts") return presetKind(row.key, entry) !== "part";
-    if (activeCategory === "@parts") return presetKind(row.key, entry) === "part";
+    if (activeCategory === "@prompts") return presetKind(row.key) !== "part";
+    if (activeCategory === "@parts") return presetKind(row.key) === "part";
     if (activeCategory === "@pinned") return Boolean(entry?.pinned);
     if (activeCategory === "@recent") return Boolean(entry?.last_used_at);
-    return presetKind(row.key, entry) !== "part" && row.key.startsWith(`${activeCategory}/`);
+    return presetKind(row.key) !== "part" && row.key.startsWith(`${activeCategory}/`);
 }
 
 function filteredRows() {
@@ -83,7 +80,7 @@ function filteredRows() {
 
 function categoryEntries() {
     const counts = new Map();
-    for (const row of rows.filter(item => presetKind(item.key, presets[item.key]) !== "part")) {
+    for (const row of rows.filter(item => presetKind(item.key) !== "part")) {
         for (let index = 1; index <= row.parts.length; index += 1) {
             const path = row.parts.slice(0, index).join("/");
             counts.set(path, (counts.get(path) || 0) + 1);
@@ -134,8 +131,8 @@ function renderCategories() {
         categories.append(button);
     };
 
-    add("Prompts", rows.filter(row => presetKind(row.key, presets[row.key]) !== "part").length, "@prompts");
-    add("Parts", rows.filter(row => presetKind(row.key, presets[row.key]) === "part").length, "@parts");
+    add("Prompts", rows.filter(row => presetKind(row.key) !== "part").length, "@prompts");
+    add("Parts", rows.filter(row => presetKind(row.key) === "part").length, "@parts");
     const pinned = rows.filter(row => presets[row.key]?.pinned).length;
     const recent = rows.filter(row => presets[row.key]?.last_used_at).length;
     if (pinned) add("Pinned", pinned, "@pinned");
