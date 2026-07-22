@@ -605,6 +605,26 @@ class PresetLoaderNode:
     FUNCTION     = "execute"
     CATEGORY     = "utils/presets"
 
+    @classmethod
+    def IS_CHANGED(cls, preset=None, text="", unique_id=None):
+        # ComfyUI caches a node's output keyed on its input widget values. When a
+        # preset is used as-is (empty text box, e.g. from the mobile frontend), the
+        # selected key stays the same even after the preset/composition is edited
+        # on disk, so ComfyUI would serve a stale cached result. Return a
+        # fingerprint of the *resolved* text — mirroring execute()'s logic — so a
+        # content edit forces the node to re-run. This resolves recursively, so
+        # edits to any referenced reusable part invalidate the cache too.
+        if text and text.strip():
+            return text
+        if preset and preset != cls.NONE_CHOICE:
+            presets = load_presets()
+            if preset in presets:
+                try:
+                    return resolve_preset(preset, presets)
+                except ValueError:
+                    return presets[preset].get("text", "")
+        return text
+
     def execute(self, preset=None, text="", unique_id=None):
         # Priority: the text box wins. If you typed anything, that overrides the
         # preset. Only when the text box is empty do we fall back to the selected
