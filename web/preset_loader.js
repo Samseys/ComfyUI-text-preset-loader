@@ -15,7 +15,6 @@ import { iconSvg, pathTone } from "./preset_icons.js";
 // =============================================================================
 
 const API_BASE = "/preset_loader";
-// ── TEXT AREA ────────────────────────────────────────────────────────────────
 
 // ── PREVIEW ──────────────────────────────────────────────────────────────────
 const PREVIEW_HEIGHT     = 200;     // default height of the preview image box (px)

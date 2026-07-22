@@ -13,12 +13,13 @@ for composition rather than a prompt to select on its own. Because a name has to
 survive being a path segment on any OS, validate_key() is stricter than the
 filesystem the library currently sits on.
 
-web/preset_model.js mirrors this file. Keep the two in sync.
+web/preset_model.js mirrors this file's shape rules exactly (parts, resolution,
+canonicalisation). Its name-validation is a deliberately partial subset, kept
+only for inline editor feedback — this file is the authority on names.
 """
 
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import PurePath
 from typing import Any
@@ -384,7 +385,3 @@ def rename_in_library(presets: dict[str, dict[str, Any]], raw_old_key: Any, raw_
             candidate["parts"] = parts
             candidate["updated_at"] = utc_now()
     return new_key
-
-
-def clone_library(presets: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return deepcopy(presets)

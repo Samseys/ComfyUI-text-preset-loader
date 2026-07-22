@@ -15,9 +15,10 @@ the constraints here:
   to overwrite good data.
 
 Usage timestamps live in a separate ``usage.json``: touching a preset is a
-frequent, low-value write, and mixing it into the library would rewrite the
-whole file — and invalidate the node's cache fingerprint — every time a preset
-was merely used.
+frequent, low-value write, and mixing it into the library would bump
+``presets.json``'s stat signature on every click, invalidating the read cache
+and forcing a full re-parse — repair_library, normalize_library and
+validate_library over the whole library — just to record a last-used time.
 """
 
 from __future__ import annotations
@@ -57,7 +58,6 @@ PREVIEWS_DIR = DATA_DIR / "previews"
 JSON_PATH = DATA_DIR / "presets.json"
 BACKUP_PATH = DATA_DIR / "presets.backup.json"
 USAGE_PATH = DATA_DIR / "usage.json"
-USAGE_BACKUP_PATH = DATA_DIR / "usage.backup.json"
 
 _lock = RLock()
 _initialized = False
@@ -86,31 +86,15 @@ def _signature(path: Path) -> tuple[int, int, int] | None:
         return None
 
 
-def _fsync_directory(directory: Path) -> None:
-    """Flush the directory entry so a rename survives a crash.
-
-    POSIX only: on Windows a directory cannot be opened for fsync, and the
-    os.replace() itself is already atomic there.
-    """
-    if os.name == "nt":
-        return
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _atomic_write_json(path: Path, backup_path: Path, payload: Any) -> None:
     """Replace `path` with `payload`, keeping the previous contents as a backup.
 
-    Ordering matters: the new file is written and flushed, the current file is
-    copied to the backup, and only then is the swap performed. At every point
-    either the old or the new library is complete on disk — a crash never leaves
-    both damaged.
+    The new file is written and fsynced to disk before anything about `path`
+    changes, so a crash at any point leaves either the old or the new library
+    fully intact on disk — never a truncated one. The backup is copied aside
+    just before the swap; it is one generation deep and best-effort, not itself
+    fsynced or atomically installed, since a corrupt file is refused on load
+    and a missing/stale backup only matters after two failures in a row.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
@@ -125,23 +109,9 @@ def _atomic_write_json(path: Path, backup_path: Path, payload: Any) -> None:
             os.fsync(handle.fileno())
 
         if path.exists():
-            backup_descriptor, backup_temporary_name = tempfile.mkstemp(
-                prefix=f".{backup_path.stem}-", suffix=".tmp", dir=str(path.parent)
-            )
-            os.close(backup_descriptor)
-            backup_temporary_path = Path(backup_temporary_name)
-            try:
-                shutil.copy2(path, backup_temporary_path)
-                # "r+b", not "rb": on Windows os.fsync() maps to _commit(), which
-                # requires a handle opened for writing and raises EBADF otherwise.
-                with backup_temporary_path.open("r+b") as backup_handle:
-                    os.fsync(backup_handle.fileno())
-                os.replace(backup_temporary_path, backup_path)
-            finally:
-                backup_temporary_path.unlink(missing_ok=True)
+            shutil.copy2(path, backup_path)
 
         os.replace(temporary_path, path)
-        _fsync_directory(path.parent)
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -397,7 +367,8 @@ def write_usage(usage: dict[str, str]) -> None:
     _ensure_initialized()
     with _lock:
         cleaned = {str(key): str(value) for key, value in usage.items() if key and value}
-        _atomic_write_json(USAGE_PATH, USAGE_BACKUP_PATH, cleaned)
+        USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        USAGE_PATH.write_text(json.dumps(cleaned), encoding="utf-8")
         _usage_cache = cleaned
         _usage_signature = _signature(USAGE_PATH)
 

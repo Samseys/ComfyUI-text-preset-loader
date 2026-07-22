@@ -65,20 +65,6 @@ BROWSE_HTML = WEB_DIR / "browse.html"
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_BATCH_EDITS = 256
 USAGE_FLUSH_DELAY_SECONDS = 0.5
-# Files the standalone browse page is allowed to pull from web/. It imports by
-# absolute URL, so every module in its import graph must be listed here.
-ALLOWED_ASSETS = {
-    "browse.css",
-    "browse.js",
-    "preset_api.js",
-    "preset_store.js",
-    "preset_composer.js",
-    "preset_model.js",
-    "preset_dnd.js",
-    "preset_dialog.js",
-    "preset_icons.js",
-    "preset_ui.css",
-}
 
 _write_lock = asyncio.Lock()
 _usage_lock = asyncio.Lock()
@@ -596,15 +582,33 @@ async def serve_preview(request):
     )
 
 
-@route("GET", "/preset_loader/assets/{filename}")
+@route("GET", "/preset_loader/assets/{filename:.+}")
 async def serve_asset(request):
+    """Serve JS/CSS from web/, including subdirectories.
+
+    `filename` is attacker-controlled: it comes straight off the URL and may
+    contain `..` segments, an encoded traversal, or an absolute path, and a
+    join with WEB_DIR does not defend against any of that (an absolute
+    right-hand side even replaces the join outright). Containment is checked
+    against the *resolved* candidate path rather than the raw string because
+    resolution is also what collapses `..` and follows symlinks — a string
+    check has no way to know a symlink inside web/ leads outside it, but a
+    resolved-path comparison does. Anything that fails any check answers 404,
+    the same as a genuinely missing file, so the route never confirms what
+    exists on disk.
+    """
     filename = request.match_info["filename"]
-    if filename not in ALLOWED_ASSETS:
+    if Path(filename).suffix.lower() not in (".js", ".css"):
         return web.Response(status=404)
-    path = WEB_DIR / filename
-    if not path.is_file():
+    web_dir = WEB_DIR.resolve()
+    candidate = (WEB_DIR / filename).resolve()
+    try:
+        candidate.relative_to(web_dir)
+    except ValueError:
         return web.Response(status=404)
-    return web.FileResponse(path, headers={
+    if not candidate.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(candidate, headers={
         "Cache-Control": "no-cache",
         "X-Content-Type-Options": "nosniff",
     })

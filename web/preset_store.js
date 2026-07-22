@@ -57,10 +57,6 @@ export async function loadPresets({ force = false, notifyListeners = false, deta
     return reloadPromise;
 }
 
-export function getPresets() {
-    return snapshot;
-}
-
 async function refreshFromEvent(detail) {
     try {
         await loadPresets({ force: true, notifyListeners: true, detail });
@@ -117,8 +113,4 @@ export function subscribePresets(listener) {
         listeners.delete(listener);
         stopEvents();
     };
-}
-
-export async function resyncPresets(detail = { action: "resync" }) {
-    return loadPresets({ force: true, notifyListeners: true, detail });
 }

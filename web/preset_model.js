@@ -1,24 +1,26 @@
 // =============================================================================
 // preset_model.js — the preset data model, with no DOM in it.
 //
-// This is the browser-side twin of preset_model.py. Both files describe the
-// same shape (a preset is an ordered list of parts; a part is either a
-// reference to another preset or inline text) and the same name rules.
+// This is the browser-side twin of preset_model.py. The two files describe the
+// same *shape* (a preset is an ordered list of parts; a part is either a
+// reference to another preset or inline text) and canonicalizeKey/normalizeParts/
+// presetKind/isComposition/simpleLeafText/resolvePreset mirror the Python
+// exactly — that mirroring is load-bearing, since both frontends resolve and
+// display presets straight from the shared store snapshot without a round trip.
 //
-// KEEP IN SYNC WITH preset_model.py. The server is still the authority — it
-// re-validates everything — but duplicating the rules here is what lets the
-// editor reject a bad name inline instead of letting the user find out from a
-// failed POST. If you change a rule there, change it here.
+// validateKey is different: the server is the sole authority on name rules and
+// re-validates every write, so this is only a cheap courtesy check that catches
+// what a user plausibly types, to give the editor an inline message instead of
+// a failed POST. It intentionally enforces a *subset* of preset_model.py's
+// rules — rare cases (Windows reserved device names, trailing dots/spaces) are
+// left to the server, whose error surfaces on submit instead. Do not try to
+// keep this in lockstep with the Python name rules; keep the shape mirroring
+// in lockstep instead.
 // =============================================================================
 
-// Mirrors MAX_KEY_LENGTH / _WINDOWS_RESERVED / _INVALID_PATH_CHARS.
+// Mirrors MAX_KEY_LENGTH / _INVALID_PATH_CHARS.
 const MAX_KEY_LENGTH = 240;
 const INVALID_PATH_CHARS = new Set('<>:"|?*\\');
-const WINDOWS_RESERVED = new Set([
-    "CON", "PRN", "AUX", "NUL",
-    ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
-    ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`),
-]);
 
 /** Mirrors preset_model.canonicalize_key. */
 export function canonicalKey(value) {
@@ -26,16 +28,9 @@ export function canonicalKey(value) {
     return key.slice(0, 6).toLowerCase() === "parts/" ? `Parts/${key.slice(6)}` : key;
 }
 
-// Python's PurePath(segment).stem — everything before the final dot, except a
-// leading dot which marks a hidden name rather than an extension.
-function segmentStem(segment) {
-    const dot = segment.lastIndexOf(".");
-    return dot > 0 ? segment.slice(0, dot) : segment;
-}
-
 /**
- * Mirrors preset_model.validate_key. Returns the canonical name, or throws an
- * Error whose message matches the server's wording for the same input.
+ * Courtesy check only — see file header. Returns the canonical name, or
+ * throws an Error with a readable message for a name a user typed by mistake.
  */
 export function validateKey(value) {
     const key = canonicalKey(value);
@@ -53,16 +48,11 @@ export function validateKey(value) {
     if (segments.some(segment => !segment)) {
         throw new Error("Preset name cannot contain empty path segments");
     }
-    for (const segment of segments) {
-        if (segment === "." || segment === "..") {
-            throw new Error("Preset name cannot contain '.' or '..' segments");
-        }
-        if (segment.endsWith(" ") || segment.endsWith(".")) {
-            throw new Error("Preset path segments cannot end with a space or period");
-        }
-        if (WINDOWS_RESERVED.has(segmentStem(segment).toUpperCase())) {
-            throw new Error(`Preset path segment "${segment}" is reserved`);
-        }
+    // Worth catching inline despite the subset policy: someone thinking in
+    // relative paths types this on purpose, and the rule is stable enough that
+    // mirroring it costs nothing.
+    if (segments.some(segment => segment === "." || segment === "..")) {
+        throw new Error("Preset name cannot contain '.' or '..' segments");
     }
     if (key === "Parts") throw new Error("Reusable parts require a name under Parts/");
     return key;
@@ -83,7 +73,7 @@ export function normalizeParts(entry) {
 
 // Unified model: content is always parts. "part" vs "prompt" is purely a
 // namespace convention (Parts/ = meant to be reused inside other presets).
-export function presetKind(key, entry) {
+export function presetKind(key) {
     return key.startsWith("Parts/") ? "part" : "prompt";
 }
 
