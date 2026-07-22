@@ -8,10 +8,10 @@ import {
     resolvePreset,
     simpleLeafText,
     validateKey,
-} from "./preset_model.js";
-import { beginPointerDrag } from "./preset_dnd.js";
-import { confirmDialog, dialogButton, footerSpacer, openDialog } from "./preset_dialog.js";
-import { element, iconSvg, pathTone } from "./preset_icons.js";
+} from "../core/model.js";
+import { beginPointerDrag } from "./dnd.js";
+import { confirmDialog, dialogButton, footerSpacer, openDialog } from "./dialog.js";
+import { element, iconSvg, pathTone } from "./icons.js";
 
 // crypto.randomUUID() only exists in secure contexts (HTTPS/localhost). Phones
 // reach ComfyUI over plain-HTTP LAN IPs, where it is undefined and throws, so
@@ -59,7 +59,7 @@ export function createPartsEditor({ presets, initialParts = [], excludeKey = nul
             preview.textContent = chunks.join("\n\n") || "The combined raw prompt appears here.";
         } catch (error) { preview.textContent = error.message; }
     }
-    // Reordering lives in preset_dnd.js; this only says what a drop means.
+    // Reordering lives in dnd.js; this only says what a drop means.
     const startDrag = (event, index, row) => beginPointerDrag({
         event, index, row, list,
         onDrop: (from, to) => {

@@ -3,12 +3,12 @@ import {
     resolvePreset,
     presetKind,
     isComposition,
-} from "./preset_model.js";
-import { openPresetEditor, openPartCreator } from "./preset_editor.js";
-import { openPresetPicker } from "./preset_picker.js";
-import { iconSvg, pathTone } from "./preset_icons.js";
-import { presetApi } from "./preset_api.js";
-import { loadPresets, subscribePresets } from "./preset_store.js";
+} from "./core/model.js";
+import { openPresetEditor, openPartCreator } from "./ui/editor.js";
+import { openPresetPicker } from "./ui/picker.js";
+import { iconSvg, pathTone } from "./ui/icons.js";
+import { presetApi } from "./core/api.js";
+import { loadPresets, subscribePresets } from "./core/store.js";
 
 const $ = selector => document.querySelector(selector);
 const PAGE_SIZE = 48;

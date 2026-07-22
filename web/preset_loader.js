@@ -3,13 +3,13 @@
 // =============================================================================
 
 import { app } from "../../scripts/app.js";
-import { presetApi } from "./preset_api.js";
-import { loadPresets, subscribePresets } from "./preset_store.js";
-import { resolvePreset as resolvePresetText, isComposition, validateKey } from "./preset_model.js";
-import { openPresetEditor, openPartCreator } from "./preset_editor.js";
-import { openPresetPicker } from "./preset_picker.js";
-import { confirmDialog, openPopover, promptDialog } from "./preset_dialog.js";
-import { iconSvg, pathTone } from "./preset_icons.js";
+import { presetApi } from "./core/api.js";
+import { loadPresets, subscribePresets } from "./core/store.js";
+import { resolvePreset as resolvePresetText, isComposition, validateKey } from "./core/model.js";
+import { openPresetEditor, openPartCreator } from "./ui/editor.js";
+import { openPresetPicker } from "./ui/picker.js";
+import { confirmDialog, openPopover, promptDialog } from "./ui/dialog.js";
+import { iconSvg, pathTone } from "./ui/icons.js";
 
 // =============================================================================
 // CONSTANTS
@@ -27,7 +27,7 @@ const NODE_MIN_WIDTH  = 300;       // minimum node width in pixels
 const NODE_MIN_HEIGHT = 200;       // minimum node height in pixels
 
 // ── COLOURS ──────────────────────────────────────────────────────────────────
-// Colours live in preset_ui.css under the .pl-node token block.
+// Colours live in styles/ui.css under the .pl-node token block.
 
 // =============================================================================
 // POPUP HELPERS
@@ -67,7 +67,7 @@ function ensureStyles() {
     const link = document.createElement("link");
     link.id = ID;
     link.rel = "stylesheet";
-    link.href = `${API_BASE}/assets/preset_ui.css`;
+    link.href = `${API_BASE}/assets/styles/ui.css`;
     document.head.append(link);
 }
 

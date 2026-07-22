@@ -1,5 +1,5 @@
 // =============================================================================
-// preset_dnd.js — pointer-based reordering for the parts list.
+// dnd.js — pointer-based reordering for the parts list.
 //
 // Not HTML5 drag-and-drop: that API has no usable touch support, and dragging is
 // the only way to reorder a part, so it has to work on a phone. Pointer events
@@ -58,7 +58,7 @@ export function beginPointerDrag({ event, index, row, list, onDrop, onCancel }) 
     if (event.button !== undefined && event.button !== 0) return;
     event.preventDefault();
 
-    // Only measured geometry is set inline; the look lives in preset_ui.css.
+    // Only measured geometry is set inline; the look lives in styles/ui.css.
     const rect = row.getBoundingClientRect();
     const ghost = row.cloneNode(true);
     ghost.classList.add("pl-drag-ghost");

@@ -1,7 +1,7 @@
 // =============================================================================
-// preset_icons.js — leaf-level UI helpers shared by every other web module.
+// icons.js — leaf-level UI helpers shared by every other web module.
 //
-// This module imports nothing. It exists so preset_dialog.js and the editor
+// This module imports nothing. It exists so dialog.js and the editor
 // and picker modules can all use iconSvg() without importing each other,
 // which would make their dependency cycle load-order dependent.
 // =============================================================================

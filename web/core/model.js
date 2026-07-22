@@ -1,5 +1,5 @@
 // =============================================================================
-// preset_model.js — the preset data model, with no DOM in it.
+// model.js — the preset data model, with no DOM in it.
 //
 // This is the browser-side twin of preset_model.py. The two files describe the
 // same *shape* (a preset is an ordered list of parts; a part is either a

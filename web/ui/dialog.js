@@ -1,5 +1,5 @@
 // =============================================================================
-// preset_dialog.js — every overlay in the plugin.
+// dialog.js — every overlay in the plugin.
 //
 // Two shapes, because they behave differently:
 //
@@ -13,7 +13,7 @@
 // teardown in preset_loader.js) can close it.
 // =============================================================================
 
-import { element, iconSvg } from "./preset_icons.js";
+import { element, iconSvg } from "./icons.js";
 
 // Dialogs can stack (creating a reusable part from inside the preset editor),
 // so each layer sits above the previous one and Escape only closes the topmost.

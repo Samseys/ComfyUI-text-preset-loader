@@ -2,9 +2,9 @@
 // choosing an existing preset or part. It only ever reports a choice back
 // through `onSelect`/`createAction`; it has no opinion on what happens next,
 // which is what keeps it decoupled from the editor.
-import { normalizeParts, presetKind } from "./preset_model.js";
-import { openPopover } from "./preset_dialog.js";
-import { element, iconSvg, pathTone } from "./preset_icons.js";
+import { normalizeParts, presetKind } from "../core/model.js";
+import { openPopover } from "./dialog.js";
+import { element, iconSvg, pathTone } from "./icons.js";
 
 export function openPresetPicker({ anchor, presets, currentKey = null, onSelect, mode = "prompts", createAction = null }) {
     document.getElementById("pl-shared-picker")?.remove();

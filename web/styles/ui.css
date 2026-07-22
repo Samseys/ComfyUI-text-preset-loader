@@ -1,5 +1,5 @@
 /* ============================================================================
- * preset_ui.css — shared component styles for the node UI and the browse page.
+ * ui.css — shared component styles for the node UI and the browse page.
  *
  * Loaded in two places: linked by browse.html, and injected into ComfyUI's
  * document by preset_loader.js.
