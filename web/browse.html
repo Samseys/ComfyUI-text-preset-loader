@@ -84,5 +84,11 @@ $("#image").onclick=()=>$("#file").click();$("#file").onchange=async e=>{const f
 $("#clear-image").onclick=async()=>{if(!editing)return;try{await post("/preset_loader/clear_preview",{key:editing});await reload();fillEditor(editing);notify("Preview cleared")}catch(e){notify(e.message)}};
 search.oninput=scheduleRender;sort.onchange=()=>{applySort();render(true)};more.onclick=()=>{visible+=PAGE;render()};
 const events=new EventSource("/preset_loader/events");events.addEventListener("presets-changed",()=>reload());
+// Mobile browsers suspend background tabs and drop the SSE stream (also when ComfyUI restarts),
+// so any edits made elsewhere in the meantime are missed. Re-sync whenever the stream (re)connects
+// and whenever the page regains focus or the network returns, so stale prompts can't linger.
+events.addEventListener("ready",()=>reload());
+const resync=()=>{if(document.visibilityState==="visible")reload().catch(()=>{})};
+document.addEventListener("visibilitychange",resync);addEventListener("focus",resync);addEventListener("online",resync);
 reload({preserve:false}).then(()=>{if(new URLSearchParams(location.search).get("compose")==="1")openEditor()}).catch(e=>{grid.replaceChildren(el("div","empty",`Could not load presets: ${e.message}`))});
 </script></body></html>
