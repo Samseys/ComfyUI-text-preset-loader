@@ -1,4 +1,8 @@
-from .preset_loader import PresetLoaderNode
+from .preset_loader import PresetLoaderNode, register_routes
+
+# Binding the HTTP routes is an explicit step rather than an import side effect,
+# so preset_loader/-_model/-_storage stay importable without a live PromptServer.
+register_routes()
 
 NODE_CLASS_MAPPINGS = {
     "PresetLoader": PresetLoaderNode,

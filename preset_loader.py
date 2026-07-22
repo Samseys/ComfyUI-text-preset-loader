@@ -1,200 +1,293 @@
-import json
-import io
-import hashlib
-import asyncio
-import os
-import tempfile
-import shutil
-from datetime import datetime, timezone
-from pathlib import Path
-from aiohttp import web
-from PIL import Image
-import server
+"""HTTP routes and the ComfyUI node.
 
-# pre-define important paths
-BASE_DIR     = Path(__file__).resolve().parent
-DATA_DIR     = BASE_DIR / "data"
-PREVIEWS_DIR = DATA_DIR / "previews"
-JSON_PATH    = DATA_DIR / "presets.json"
-BROWSE_HTML  = BASE_DIR / "web" / "browse.html"  # standalone mobile editor page
+Everything the browser talks to lives here; the layers underneath
+(preset_model, preset_storage, preset_previews) know nothing about aiohttp.
+
+Two conventions run through the handlers:
+
+* mutations take ``_write_lock`` and then read with ``strict=True``, so a
+  request never bases a write on a library that failed validation, and two
+  concurrent requests cannot interleave read-modify-write;
+* successful mutations call publish_change(), which pushes an invalidation over
+  SSE. Clients re-fetch rather than receiving the change itself, so an open
+  canvas node and a phone on the browse page converge on the same state without
+  either becoming a replication target.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import shutil
+from copy import deepcopy
+from functools import wraps
+from pathlib import Path
+from typing import Any
+
+from aiohttp import web
+
+from .preset_model import (
+    PresetValidationError,
+    normalize_parts,
+    rename_in_library,
+    resolve_preset,
+    save_into_library,
+    utc_now,
+    validate_key,
+    validate_library,
+)
+from .preset_previews import (
+    PreviewError,
+    delete_preview_file,
+    new_preview_filename,
+    preview_path,
+    process_image_to_temp,
+    read_preview_upload,
+)
+from .preset_storage import (
+    BASE_DIR,
+    PREVIEWS_DIR,
+    PresetStorageError,
+    presets_with_usage,
+    read_presets,
+    read_usage,
+    storage_warning,
+    write_presets,
+    write_usage,
+)
+
+LOGGER = logging.getLogger("comfyui.text_preset_loader")
+WEB_DIR = BASE_DIR / "web"
+BROWSE_HTML = WEB_DIR / "browse.html"
+MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_BATCH_EDITS = 256
+USAGE_FLUSH_DELAY_SECONDS = 0.5
+# Files the standalone browse page is allowed to pull from web/. It imports by
+# absolute URL, so every module in its import graph must be listed here.
+ALLOWED_ASSETS = {
+    "browse.css",
+    "browse.js",
+    "preset_api.js",
+    "preset_store.js",
+    "preset_composer.js",
+    "preset_model.js",
+    "preset_dnd.js",
+    "preset_dialog.js",
+    "preset_icons.js",
+    "preset_ui.css",
+}
 
 _write_lock = asyncio.Lock()
+_usage_lock = asyncio.Lock()
 _subscribers: set[asyncio.Queue] = set()
 _revision = 0
+_pending_usage: dict[str, str] = {}
+_usage_flush_task: asyncio.Task | None = None
+_resolved_snapshot: dict[str, dict[str, Any]] | None = None
+_resolved_outputs: dict[str, str] = {}
 
-# if for some reason the user deleted the folder and the JSON
-DATA_DIR.mkdir(exist_ok=True)
-PREVIEWS_DIR.mkdir(exist_ok=True)
 
-if not JSON_PATH.exists():
-    def _starter(text, preview):
-        # Unified model: every preset is an ordered list of parts.
-        return {
-            "parts": [{"text": text, "label": "Text", "enabled": True}],
-            "preview": preview, "preview_version": 1,
-        }
-    starter = {
-        "Flux/Styles/oil_painting_aivazovsky": _starter(
-            "Oil on canvas painting in the style of Ivan Aivazovsky, characteristic thick brushstrokes and rich texture, deep navy and grey tones with golden highlights.",
-            "Flux_Styles_oil_painting_aivazovsky.jpg"),
-        "Flux/Styles/post_impressionism_vangogh": _starter(
-            "Post-impressionism painting in the style of Vincent Van Gogh, swirling expressive brushstrokes, bold impasto texture, vivid contrasting colors.",
-            "Flux_Styles_post_impressionism_vangogh.jpg"),
-        "Flux/Styles/frank_frazetta": _starter(
-            "Frank Frazetta fantasy illustration style, bold expressive brushstrokes, vivid dramatic colors.",
-            "Flux_Styles_frank_frazetta.jpg"),
-        "Flux/Styles/edvard_munch_scream": _starter(
-            "Oil painting in the style of Edvard Munch's The Scream, expressionist style, muted warm and cold contrast, thick visible brushstrokes.",
-            "Flux_Styles_edvard_munch_scream.jpg"),
-        "Flux/Styles/jack_kirby_comics": _starter(
-            "Comic art in the style of Jack Kirby, vibrant bold colors, iconic Kirby krackle energy effects, thick outlines, retro superhero aesthetic, dramatic perspective, flat cel-shaded coloring.",
-            "Flux_Styles_jack_kirby_comics.jpg"),
-        "Flux/Styles/ukiyo_e": _starter(
-            "Ukiyo-e woodblock print style, bold black outlines, flat perspective, vibrant traditional colors, dynamic diagonal composition, asymmetrical arrangements, sense of movement and energy, decorative graphic elements, traditional Japanese aesthetic.",
-            "Flux_Styles_ukiyo_e.jpg"),
-        "Flux/Styles/alphonse_mucha_artnouveau": _starter(
-            "Alphonse Mucha Art Nouveau style, flowing organic curvilinear lines, muted earthy pastel color palette, subtle watercolor-like textures, ornate decorative elements, intricate fine details, elegant poster composition, natural forms and curves, warm tactile feel.",
-            "Flux_Styles_alphonse_mucha_artnouveau.jpg"),
-    }
-    JSON_PATH.write_text(json.dumps(starter, indent=2))
+class RequestError(ValueError):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
-# helper functions
 
-def load_presets() -> dict:
+def json_error(message: str, status: int) -> web.Response:
+    return web.json_response({"status": "error", "message": message}, status=status)
+
+
+def route_guard(handler):
+    """Translate exceptions into HTTP responses.
+
+    Handlers raise domain errors and stay free of status codes; the mapping to
+    status lives here so it is consistent across every route. CancelledError is
+    re-raised deliberately — swallowing it would break aiohttp's shutdown — and
+    the catch-all logs the traceback but answers with a generic message, since
+    the text reaches a browser.
     """
-    Read presets.json from disk and return it as a Python dict.
-    If the file is missing or corrupted, return an empty dict
-    instead of crashing — the node should always be usable.
+    @wraps(handler)
+    async def wrapped(request):
+        try:
+            return await handler(request)
+        except (RequestError, PreviewError) as exc:
+            # Both carry the status they should be answered with.
+            return json_error(str(exc), exc.status)
+        except PresetValidationError as exc:
+            return json_error(str(exc), 400)
+        except KeyError as exc:
+            return json_error(str(exc.args[0] if exc.args else "Not found"), 404)
+        except PresetStorageError as exc:
+            LOGGER.error("Preset storage operation refused for %s %s: %s", request.method, request.path, exc)
+            return json_error(
+                "Preset storage is unavailable or invalid; check the ComfyUI log and restore presets.json.",
+                409,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Unhandled preset-loader request failure for %s %s", request.method, request.path)
+            return json_error("The preset operation could not be completed", 500)
+
+    return wrapped
+
+
+async def read_json_body(request: web.Request) -> dict[str, Any]:
+    """Read and parse a JSON request body under a hard size cap.
+
+    Content-Length is checked first as a cheap rejection, but it is client-
+    supplied and may be absent or lie, so the streamed read enforces the same
+    limit again and aborts mid-body rather than buffering the whole thing.
     """
+    if request.content_type != "application/json":
+        raise RequestError("Content-Type must be application/json", 415)
+    if request.content_length is not None and request.content_length > MAX_JSON_BYTES:
+        raise RequestError("Request body is too large", 413)
+    payload = bytearray()
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        payload.extend(chunk)
+        if len(payload) > MAX_JSON_BYTES:
+            raise RequestError("Request body is too large", 413)
     try:
-        return json.loads(JSON_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        body = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RequestError("Request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise RequestError("Request body must be a JSON object")
+    return body
 
 
-def save_presets(data: dict) -> None:
+def publish_change(action: str, key: str | None = None, *, content_changed: bool = True) -> None:
+    """Tell every connected client that the library moved.
+
+    `content_changed=False` marks changes that alter presentation but not any
+    resolved prompt (pinning, preview images). A canvas node uses it to skip
+    re-resolving text it already has, which matters because re-resolving would
+    otherwise clobber a text override the user is mid-edit.
+
+    Each subscriber queue holds one event. When it is full the oldest is dropped
+    rather than blocking: the events are invalidation signals, so a slow or
+    backgrounded tab only needs the most recent one.
     """
-    Write the presets dict back to presets.json.
-    indent=2 keeps it human-readable so users can hand-edit it if they want.
-    ensure_ascii=False preserves non-latin characters (Japanese tags, etc.)
-    """
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
-    fd, temp_name = tempfile.mkstemp(
-        prefix="presets-", suffix=".tmp", dir=str(DATA_DIR)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, JSON_PATH)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
-
-
-def publish_change(action: str, key: str | None = None) -> None:
-    """Notify all open canvas/browser clients after a successful mutation."""
     global _revision
     _revision += 1
-    event = {"revision": _revision, "action": action, "key": key}
+    event = {
+        "revision": _revision,
+        "action": action,
+        "key": key,
+        "content_changed": content_changed,
+    }
     for queue in tuple(_subscribers):
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
-            # A refresh event is only an invalidation signal, so retaining the
-            # newest event is enough for a slow/background browser tab.
             try:
                 queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
-            queue.put_nowait(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
 
 
-def preset_key_to_filename(key: str) -> str:
+async def _flush_pending_usage() -> None:
+    """Write buffered last-used timestamps once, after a short delay.
+
+    Selecting presets in quick succession would otherwise mean a file write per
+    click. Touches accumulate in memory and land in one write; entries for
+    presets that no longer exist are dropped on the way, which is what keeps
+    usage.json from growing stale keys forever.
     """
-    Convert a preset path like "Styles/lighting/golden_hour"
-    into a safe filename like "Styles_lighting_golden_hour.jpg"
-    We replace "/" with "_" because slashes are not valid in filenames.
+    global _usage_flush_task
+    await asyncio.sleep(USAGE_FLUSH_DELAY_SECONDS)
+    async with _usage_lock:
+        updates = dict(_pending_usage)
+        _pending_usage.clear()
+        if not updates:
+            _usage_flush_task = None
+            return
+        try:
+            presets = await asyncio.to_thread(read_presets)
+            usage = await asyncio.to_thread(read_usage, copy_data=True)
+            usage = {name: value for name, value in usage.items() if name in presets}
+            usage.update({name: value for name, value in updates.items() if name in presets})
+            await asyncio.to_thread(write_usage, usage)
+        except Exception:
+            # Recent-use metadata is non-critical. Keep the newest values in memory
+            # and retry on the next touch instead of affecting prompt operations.
+            _pending_usage.update(updates)
+            LOGGER.warning("Could not persist preset usage metadata", exc_info=True)
+        finally:
+            _usage_flush_task = None
+
+
+def _schedule_usage_flush() -> None:
+    global _usage_flush_task
+    if _usage_flush_task is None or _usage_flush_task.done():
+        _usage_flush_task = asyncio.create_task(_flush_pending_usage())
+
+
+async def _move_usage_metadata(old_key: str, new_key: str) -> None:
+    async with _usage_lock:
+        if old_key in _pending_usage:
+            _pending_usage[new_key] = _pending_usage.pop(old_key)
+        usage = await asyncio.to_thread(read_usage, copy_data=True)
+        if old_key in usage:
+            usage[new_key] = usage.pop(old_key)
+            try:
+                await asyncio.to_thread(write_usage, usage)
+            except OSError:
+                LOGGER.warning("Could not update usage metadata after rename", exc_info=True)
+
+
+_ROUTES: list[tuple[str, str, Any]] = []
+
+
+def route(method: str, path: str):
+    """Collect a handler for later binding by register_routes().
+
+    Deferred rather than bound at import time so this module can be imported
+    without a live ``server.PromptServer.instance`` — which is what keeps the
+    route, storage and model layers loadable outside a running ComfyUI.
     """
-    return key.replace("/", "_") + ".jpg"
+    def decorate(handler):
+        _ROUTES.append((method, path, handler))
+        return handler
+    return decorate
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def register_routes(routes=None) -> None:
+    """Bind every collected handler onto ComfyUI's route table."""
+    if routes is None:
+        import server
+
+        routes = server.PromptServer.instance.routes
+    for method, path, handler in _ROUTES:
+        routes.route(method, path)(handler)
 
 
-def normalize_parts(parts) -> list[dict]:
-    """Return the stable on-disk representation for composition parts."""
-    if not isinstance(parts, list):
-        return []
-    normalized = []
-    for part in parts:
-        if isinstance(part, str):
-            key, text, enabled = part.strip(), "", True
-        elif isinstance(part, dict):
-            key = str(part.get("key", "")).strip()
-            text = str(part.get("text", ""))
-            enabled = bool(part.get("enabled", True))
-        else:
-            continue
-        if key:
-            normalized.append({"key": key, "enabled": enabled})
-        elif text.strip():
-            normalized.append({
-                "text": text,
-                "label": str(part.get("label", "Custom")).strip() or "Custom",
-                "enabled": enabled,
-            })
-    return normalized
-
-
-def resolve_preset(key: str, presets: dict, stack=None) -> str:
-    """Resolve a preset to raw text; wildcard syntax is never parsed.
-
-    Every preset is an ordered list of parts. A part is either a *reference*
-    to another preset (``{"key": ...}``) or *inline text* (``{"text": ...}``).
-    Enabled parts are resolved in order and joined with blank lines. A bare
-    legacy ``text`` field (hand-edited JSON) is treated as a single inline part.
-    """
-    stack = [] if stack is None else stack
-    if key in stack:
-        raise ValueError("Circular composition: " + " -> ".join(stack + [key]))
-    entry = presets.get(key)
-    if not isinstance(entry, dict):
-        raise ValueError(f'Missing preset referenced by composition: "{key}"')
-    parts = normalize_parts(entry.get("parts"))
-    if not parts:
-        # Backward-compat: a hand-edited entry with only a bare `text` field.
-        return str(entry.get("text", "")).strip()
-    resolved = []
-    for part in parts:
-        if part["enabled"]:
-            text = (resolve_preset(part["key"], presets, stack + [key])
-                    if part.get("key") else part.get("text", "")).strip()
-            if text:
-                resolved.append(text)
-    return "\n\n".join(resolved)
-
-
-# API endpoints
-routes = server.PromptServer.instance.routes
-
-
-@routes.get("/preset_loader/list")
+@route("GET", "/preset_loader/list")
+@route_guard
 async def list_presets(request):
-    """
-    GET /preset_loader/list
-    Returns the full presets.json as JSON.
-    The JS calls this on node load to populate the dropdown.
-    """
-    presets = load_presets()
-    return web.json_response(presets)
+    presets = await asyncio.to_thread(presets_with_usage)
+    async with _usage_lock:
+        pending_usage = dict(_pending_usage)
+    for key, used_at in pending_usage.items():
+        if key in presets:
+            presets[key]["last_used_at"] = used_at
+    headers = {"Cache-Control": "no-store"}
+    warning = storage_warning()
+    if warning:
+        headers["X-Preset-Loader-Warning"] = "storage-invalid"
+    return web.json_response(presets, headers=headers)
 
 
-@routes.get("/preset_loader/events")
+@route("GET", "/preset_loader/events")
 async def preset_events(request):
-    """Server-sent invalidation events shared by canvas and mobile clients."""
     response = web.StreamResponse(headers={
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -205,447 +298,434 @@ async def preset_events(request):
     queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     _subscribers.add(queue)
     try:
-        await response.write(b"event: ready\ndata: {}\n\n")
+        ready = json.dumps({"revision": _revision})
+        await response.write(f"event: ready\ndata: {ready}\n\n".encode("utf-8"))
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=20)
                 payload = json.dumps(event, ensure_ascii=False)
-                await response.write(f"event: presets-changed\ndata: {payload}\n\n".encode("utf-8"))
+                await response.write(
+                    f"event: presets-changed\ndata: {payload}\n\n".encode("utf-8")
+                )
             except asyncio.TimeoutError:
                 await response.write(b": keepalive\n\n")
-    except (ConnectionResetError, asyncio.CancelledError):
+    except asyncio.CancelledError:
+        raise
+    except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
         _subscribers.discard(queue)
     return response
 
 
-@routes.post("/preset_loader/save")
+@route("POST", "/preset_loader/save")
+@route_guard
 async def save_preset(request):
+    body = await read_json_body(request)
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        text_supplied = "text" in body
+        key = save_into_library(
+            presets,
+            body.get("key"),
+            text=str(body.get("text", "")) if text_supplied else None,
+            parts=body.get("parts"),
+            parts_supplied="parts" in body,
+        )
+        validate_library(presets)
+        await asyncio.to_thread(write_presets, presets)
+    publish_change("save", key)
+    return web.json_response({"status": "ok", "key": key})
+
+
+@route("POST", "/preset_loader/batch")
+@route_guard
+async def batch_update_presets(request):
+    """Commit an editor session as one transaction.
+
+    Saving a composition can touch several presets at once: inline edits to the
+    parts it references, a rename of the preset itself, and its own new content.
+    Doing that as separate requests would leave the library briefly inconsistent
+    — and a failure halfway through would strand it there. Everything is applied
+    to one in-memory copy, validated, and written once.
+
+    Order matters: referenced parts are saved first so the rename can rewrite
+    references, and the target preset is written last.
     """
-    POST /preset_loader/save
-    Saves a preset (new or overwrite).
-    The JS sends this when the user confirms in the Save As popup.
+    body = await read_json_body(request)
+    edited = body.get("edited", [])
+    if not isinstance(edited, list):
+        raise RequestError("Edited presets must be a list")
+    if len(edited) > MAX_BATCH_EDITS:
+        raise RequestError(f"A batch cannot edit more than {MAX_BATCH_EDITS} presets")
 
-    Expected request body (JSON):
-    { "key": "Styles/lighting/golden_hour", "text": "warm tones, ..." }
-    """
-    try:
-        body = await request.json()
-        key  = body.get("key", "").strip()
-        text = body.get("text", "").strip()
-        parts_supplied = "parts" in body
+    renamed_from: str | None = None
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        for item in edited:
+            if not isinstance(item, dict):
+                raise RequestError("Each edited preset must be an object")
+            save_into_library(
+                presets,
+                item.get("key"),
+                parts=item.get("parts"),
+                parts_supplied=True,
+            )
 
-        if not key:
-            return web.json_response({"status": "error", "message": "Preset name cannot be empty"})
+        current_key = body.get("current_key")
+        target_key = validate_key(body.get("key"))
+        if current_key:
+            current_key = validate_key(current_key)
+            if current_key != target_key:
+                renamed_from = current_key
+                rename_in_library(presets, current_key, target_key)
 
-        async with _write_lock:
-            presets  = load_presets()
-            existing = presets.get(key, {})
-            parts = normalize_parts(body.get("parts") if parts_supplied else existing.get("parts"))
-            # Unified model: content is always parts. A client that posts a bare
-            # `text` (e.g. a quick save) is canonicalised into a single inline part.
-            if not parts and text:
-                parts = [{"text": text, "label": "Text", "enabled": True}]
-            if any(part.get("key") == key for part in parts):
-                return web.json_response({"status": "error", "message": "A composition cannot include itself"})
-            missing = [part["key"] for part in parts if part.get("key") and part["key"] not in presets]
-            if missing:
-                return web.json_response({"status": "error", "message": f'Missing preset: {missing[0]}'})
-            entry = {
-                "parts":           parts,
-                "preview":         existing.get("preview", None),
-                "preview_version": existing.get("preview_version", 0),
-                "pinned":          existing.get("pinned", False),
-                "created_at":      existing.get("created_at", utc_now()),
-                "updated_at":      utc_now(),
-                "last_used_at":    existing.get("last_used_at", None),
-            }
-            presets[key] = entry
-            resolve_preset(key, presets)
-            save_presets(presets)
-        publish_change("save", key)
-        return web.json_response({"status": "ok"})
+        save_into_library(
+            presets,
+            target_key,
+            parts=body.get("parts"),
+            parts_supplied=True,
+        )
+        validate_library(presets)
+        await asyncio.to_thread(write_presets, presets)
 
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+    if renamed_from:
+        await _move_usage_metadata(renamed_from, target_key)
+    publish_change("batch", target_key)
+    return web.json_response({"status": "ok", "key": target_key})
 
 
-@routes.post("/preset_loader/rename")
+@route("POST", "/preset_loader/rename")
+@route_guard
 async def rename_preset(request):
-    try:
-        body = await request.json()
-        old_key = body.get("old_key", "").strip()
-        new_key = body.get("new_key", "").strip()
-        if not old_key or not new_key:
-            return web.json_response({"status": "error", "message": "Both names are required"})
-        async with _write_lock:
-            presets = load_presets()
-            if old_key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            if new_key != old_key and new_key in presets:
-                return web.json_response({"status": "error", "message": "A preset with that name already exists"})
-            entry = presets.pop(old_key)
-            if entry.get("preview"):
-                old_path = PREVIEWS_DIR / entry["preview"]
-                new_filename = preset_key_to_filename(new_key)
-                new_path = PREVIEWS_DIR / new_filename
-                if old_path.exists() and old_path != new_path:
-                    old_path.replace(new_path)
-                entry["preview"] = new_filename
-                entry["preview_version"] = entry.get("preview_version", 0) + 1
-            entry["updated_at"] = utc_now()
-            presets[new_key] = entry
-            for candidate in presets.values():
-                parts = normalize_parts(candidate.get("parts"))
-                for part in parts:
-                    if part.get("key") == old_key:
-                        part["key"] = new_key
-                if parts:
-                    candidate["parts"] = parts
-            save_presets(presets)
-        publish_change("rename", new_key)
-        return web.json_response({"status": "ok", "key": new_key})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+    body = await read_json_body(request)
+    old_key = validate_key(body.get("old_key"))
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        new_key = rename_in_library(presets, old_key, body.get("new_key"))
+        validate_library(presets)
+        await asyncio.to_thread(write_presets, presets)
+
+    if old_key != new_key:
+        await _move_usage_metadata(old_key, new_key)
+    publish_change("rename", new_key)
+    return web.json_response({"status": "ok", "key": new_key})
 
 
-@routes.post("/preset_loader/duplicate")
+@route("POST", "/preset_loader/duplicate")
+@route_guard
 async def duplicate_preset(request):
-    try:
-        body = await request.json()
-        source_key = body.get("source_key", "").strip()
-        new_key = body.get("new_key", "").strip()
-        if not source_key or not new_key:
-            return web.json_response({"status": "error", "message": "Source and new name are required"})
-        async with _write_lock:
-            presets = load_presets()
-            if source_key not in presets:
-                return web.json_response({"status": "error", "message": "Source preset not found"})
-            if new_key in presets:
-                return web.json_response({"status": "error", "message": "A preset with that name already exists"})
-            source = presets[source_key]
-            entry = dict(source)
-            if source.get("preview"):
-                old_path = PREVIEWS_DIR / source["preview"]
-                new_filename = preset_key_to_filename(new_key)
-                if old_path.exists():
-                    shutil.copy2(old_path, PREVIEWS_DIR / new_filename)
-                    entry["preview"] = new_filename
-            entry["pinned"] = False
-            entry["created_at"] = utc_now()
-            entry["updated_at"] = entry["created_at"]
-            entry["last_used_at"] = None
-            entry["preview_version"] = entry.get("preview_version", 0) + 1
-            presets[new_key] = entry
-            save_presets(presets)
-        publish_change("duplicate", new_key)
-        return web.json_response({"status": "ok", "key": new_key})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+    body = await read_json_body(request)
+    source_key = validate_key(body.get("source_key"))
+    new_key = validate_key(body.get("new_key"))
+    copied_preview: Path | None = None
 
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        if source_key not in presets:
+            raise KeyError("Source preset not found")
+        if new_key in presets:
+            raise PresetValidationError("A preset with that name already exists")
 
-@routes.post("/preset_loader/pin")
-async def pin_preset(request):
-    try:
-        body = await request.json()
-        key = body.get("key", "").strip()
-        pinned = bool(body.get("pinned", True))
-        async with _write_lock:
-            presets = load_presets()
-            if key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            presets[key]["pinned"] = pinned
-            save_presets(presets)
-        publish_change("pin", key)
-        return web.json_response({"status": "ok", "pinned": pinned})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+        entry = deepcopy(presets[source_key])
+        source_preview = preview_path(entry.get("preview"))
+        if source_preview and source_preview.exists():
+            filename = new_preview_filename()
+            copied_preview = PREVIEWS_DIR / filename
+            await asyncio.to_thread(shutil.copy2, source_preview, copied_preview)
+            entry["preview"] = filename
+            entry["preview_version"] = int(entry.get("preview_version", 0) or 0) + 1
 
-
-@routes.post("/preset_loader/touch")
-async def touch_preset(request):
-    try:
-        body = await request.json()
-        key = body.get("key", "").strip()
-        async with _write_lock:
-            presets = load_presets()
-            if key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            presets[key]["last_used_at"] = utc_now()
-            save_presets(presets)
-        publish_change("touch", key)
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
-
-
-@routes.post("/preset_loader/delete")
-async def delete_preset(request):
-    """
-    POST /preset_loader/delete
-    Deletes a preset and its preview image (if one exists).
-
-    Expected request body (JSON):
-    { "key": "Styles/lighting/golden_hour" }
-    """
-    try:
-        body = await request.json()
-        key  = body.get("key", "").strip()
-
-        if not key:
-            return web.json_response({"status": "error", "message": "No preset key provided"})
-
-        async with _write_lock:
-            presets = load_presets()
-            if key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            used_by = [name for name, entry in presets.items()
-                       if any(part.get("key") == key for part in normalize_parts(entry.get("parts")))]
-            if used_by:
-                return web.json_response({
-                    "status": "error",
-                    "message": f'Preset is used by composition: {used_by[0]}',
-                })
-            preview_filename = presets[key].get("preview")
-            if preview_filename:
-                preview_path = PREVIEWS_DIR / preview_filename
-                if preview_path.exists():
-                    preview_path.unlink()
-            del presets[key]
-            save_presets(presets)
-        publish_change("delete", key)
-
-        return web.json_response({"status": "ok"})
-
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
-
-
-@routes.post("/preset_loader/set_preview")
-async def set_preview(request):
-    """
-    POST /preset_loader/set_preview
-    Saves an image file as the preview for a preset.
-    The JS sends this when the user picks an image via the file picker.
-
-    The request is multipart/form-data:
-    - "key"  → the preset path string
-    - "file" → the image file bytes
-    """
-    try:
-        reader   = await request.multipart()
-        key      = None
-        img_data = None
-
-        async for part in reader:
-            if part.name == "key":
-                key = (await part.read()).decode("utf-8").strip()
-            elif part.name == "file":
-                img_data = await part.read()
-
-        if not key or not img_data:
-            return web.json_response({"status": "error", "message": "Missing key or file"})
-
-        # Validate and resize with Pillow.
-        # verify() does a deep integrity check — raises if not a valid image.
-        # We reopen after verify() because verify() closes the file handle.
+        now = utc_now()
+        entry["pinned"] = False
+        entry["created_at"] = now
+        entry["updated_at"] = now
+        entry["last_used_at"] = None
+        presets[new_key] = entry
         try:
-            image = Image.open(io.BytesIO(img_data))
-            image.verify()
-            image = Image.open(io.BytesIO(img_data))
+            validate_library(presets)
+            await asyncio.to_thread(write_presets, presets)
         except Exception:
-            return web.json_response({"status": "error", "message": "File is not a valid image"})
+            if copied_preview:
+                copied_preview.unlink(missing_ok=True)
+            raise
 
-        # Normalize to RGB (handles RGBA, palette, greyscale, etc.)
-        # thumbnail() resizes down preserving aspect ratio, never upscales.
-        # LANCZOS = best quality downscaling algorithm.
-        # We target 1 megapixel (1,000,000 pixels) max.
-        # thumbnail() takes a bounding box — we use 1000x1000 which gives
-        # exactly 1MP for square images and proportionally less for others.
-        image = image.convert("RGB")
-        image.thumbnail((1000, 1000), Image.LANCZOS)
-
-        # Save as JPEG — much smaller than PNG for photos
-        async with _write_lock:
-            presets = load_presets()
-            if key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            filename = preset_key_to_filename(key)
-            preview_path = PREVIEWS_DIR / filename
-            image.save(preview_path, format="JPEG", quality=85, optimize=True)
-            current_version = presets[key].get("preview_version", 0)
-            presets[key]["preview"] = filename
-            presets[key]["preview_version"] = current_version + 1
-            save_presets(presets)
-
-        publish_change("preview", key)
-
-        return web.json_response({
-            "status":          "ok",
-            "filename":        filename,
-            "preview_version": presets[key]["preview_version"]
-        })
-
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+    publish_change("duplicate", new_key)
+    return web.json_response({"status": "ok", "key": new_key})
 
 
-@routes.post("/preset_loader/clear_preview")
-async def clear_preview(request):
-    """
-    POST /preset_loader/clear_preview
-    Removes a preset's preview image: deletes the file from disk and clears the
-    `preview`/`preview_version` fields. The JS calls this from the "clear" button.
+@route("POST", "/preset_loader/pin")
+@route_guard
+async def pin_preset(request):
+    body = await read_json_body(request)
+    key = validate_key(body.get("key"))
+    pinned = body.get("pinned", True) is True
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        if key not in presets:
+            raise KeyError("Preset not found")
+        presets[key]["pinned"] = pinned
+        presets[key]["updated_at"] = utc_now()
+        await asyncio.to_thread(write_presets, presets)
+    publish_change("pin", key, content_changed=False)
+    return web.json_response({"status": "ok", "pinned": pinned})
 
-    Expected request body (JSON):
-    { "key": "Styles/lighting/golden_hour" }
-    """
+
+@route("POST", "/preset_loader/touch")
+@route_guard
+async def touch_preset(request):
+    body = await read_json_body(request)
+    key = validate_key(body.get("key"))
+    presets = await asyncio.to_thread(read_presets)
+    if key not in presets:
+        raise KeyError("Preset not found")
+    async with _usage_lock:
+        _pending_usage[key] = utc_now()
+        _schedule_usage_flush()
+    return web.json_response({"status": "ok"})
+
+
+@route("POST", "/preset_loader/delete")
+@route_guard
+async def delete_preset(request):
+    body = await read_json_body(request)
+    key = validate_key(body.get("key"))
+    preview_filename: str | None = None
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        if key not in presets:
+            raise KeyError("Preset not found")
+        used_by = [
+            name for name, entry in presets.items()
+            if any(part.get("key") == key for part in normalize_parts(entry.get("parts")))
+        ]
+        if used_by:
+            raise PresetValidationError(f'Preset is used by composition: {used_by[0]}')
+        preview_filename = presets[key].get("preview")
+        del presets[key]
+        await asyncio.to_thread(write_presets, presets)
+
+    async with _usage_lock:
+        _pending_usage.pop(key, None)
+        usage = await asyncio.to_thread(read_usage, copy_data=True)
+        if usage.pop(key, None) is not None:
+            try:
+                await asyncio.to_thread(write_usage, usage)
+            except OSError:
+                LOGGER.warning("Could not remove usage metadata after deletion", exc_info=True)
+    await asyncio.to_thread(delete_preview_file, preview_filename)
+    publish_change("delete", key)
+    return web.json_response({"status": "ok"})
+
+
+@route("POST", "/preset_loader/set_preview")
+@route_guard
+async def set_preview(request):
+    key, image_bytes = await read_preview_upload(request)
+    presets_snapshot = await asyncio.to_thread(read_presets)
+    if key not in presets_snapshot:
+        raise KeyError("Preset not found")
+
+    temporary_path = await asyncio.to_thread(process_image_to_temp, image_bytes)
+    final_filename = new_preview_filename()
+    final_path = PREVIEWS_DIR / final_filename
+    old_filename: str | None = None
+    version = 0
     try:
-        body = await request.json()
-        key  = body.get("key", "").strip()
-
-        if not key:
-            return web.json_response({"status": "error", "message": "No preset key provided"})
-
         async with _write_lock:
-            presets = load_presets()
+            presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
             if key not in presets:
-                return web.json_response({"status": "error", "message": "Preset not found"})
-            preview_filename = presets[key].get("preview")
-            if preview_filename:
-                preview_path = PREVIEWS_DIR / preview_filename
-                if preview_path.exists():
-                    preview_path.unlink()
-            current_version = presets[key].get("preview_version", 0)
-            presets[key]["preview"] = None
-            presets[key]["preview_version"] = current_version + 1
-            save_presets(presets)
+                raise KeyError("Preset not found")
+            old_filename = presets[key].get("preview")
+            await asyncio.to_thread(os.replace, temporary_path, final_path)
+            version = int(presets[key].get("preview_version", 0) or 0) + 1
+            presets[key]["preview"] = final_filename
+            presets[key]["preview_version"] = version
+            presets[key]["updated_at"] = utc_now()
+            try:
+                await asyncio.to_thread(write_presets, presets)
+            except Exception:
+                final_path.unlink(missing_ok=True)
+                raise
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
-        publish_change("preview", key)
+    if old_filename and old_filename != final_filename:
+        await asyncio.to_thread(delete_preview_file, old_filename)
+    publish_change("preview", key, content_changed=False)
+    return web.json_response({
+        "status": "ok",
+        "filename": final_filename,
+        "preview_version": version,
+    })
 
-        return web.json_response({"status": "ok"})
 
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)})
+@route("POST", "/preset_loader/clear_preview")
+@route_guard
+async def clear_preview(request):
+    body = await read_json_body(request)
+    key = validate_key(body.get("key"))
+    old_filename: str | None = None
+    async with _write_lock:
+        presets = await asyncio.to_thread(read_presets, strict=True, copy_data=True)
+        if key not in presets:
+            raise KeyError("Preset not found")
+        old_filename = presets[key].get("preview")
+        presets[key]["preview"] = None
+        presets[key]["preview_version"] = int(presets[key].get("preview_version", 0) or 0) + 1
+        presets[key]["updated_at"] = utc_now()
+        await asyncio.to_thread(write_presets, presets)
+    await asyncio.to_thread(delete_preview_file, old_filename)
+    publish_change("preview", key, content_changed=False)
+    return web.json_response({"status": "ok"})
 
 
-@routes.get("/preset_loader/preview/{filename}")
+@route("GET", "/preset_loader/preview/{filename}")
 async def serve_preview(request):
-    """
-    GET /preset_loader/preview/{filename}
-    Serves a preview image file to the JS.
-    Returns 404 if the file doesn't exist.
-    """
-    filename     = request.match_info["filename"]
-    preview_path = PREVIEWS_DIR / filename
-
-    # Security check — prevent path traversal attacks
-    if not str(preview_path.resolve()).startswith(str(PREVIEWS_DIR.resolve())):
+    path = preview_path(request.match_info["filename"])
+    if path is None:
         return web.Response(status=403)
-
-    if not preview_path.exists():
+    if not path.is_file():
         return web.Response(status=404)
+    return web.FileResponse(
+        path,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
-    return web.FileResponse(preview_path)
+
+@route("GET", "/preset_loader/assets/{filename}")
+async def serve_asset(request):
+    filename = request.match_info["filename"]
+    if filename not in ALLOWED_ASSETS:
+        return web.Response(status=404)
+    path = WEB_DIR / filename
+    if not path.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(path, headers={
+        "Cache-Control": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
-@routes.get("/preset_loader/browse")
+@route("GET", "/preset_loader/browse")
 async def browse_presets(request):
-    """
-    GET /preset_loader/browse
-    Serves the standalone, mobile-friendly editor page (web/browse.html). Open
-    this in a phone browser to edit a preset's text and save it, create new
-    presets, delete presets, or copy text to paste into the node's text box in
-    the mobile frontend. The page reuses the /preset_loader/list, /save, and
-    /delete endpoints. Served from disk each request, so edits to browse.html
-    take effect on reload without restarting ComfyUI.
-    """
-    if not BROWSE_HTML.exists():
+    if not BROWSE_HTML.is_file():
         return web.Response(status=404, text="browse.html not found")
-    return web.FileResponse(BROWSE_HTML)
+    return web.FileResponse(BROWSE_HTML, headers={
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'self'"
+        ),
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    })
 
-
-# NODE CLASS
 
 class PresetLoaderNode:
-
-    # Sentinel for "no preset selected" — kept as a constant so the JS and the
-    # backend agree on the exact string.
+    # Sentinel for "no preset selected". Shared with the JS, which must send the
+    # exact same string, so it lives here rather than being written twice.
     NONE_CHOICE = "(none)"
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Build the dropdown choices from presets.json at object_info time.
-        # Declaring `preset` as a real widget (instead of a JS-only DOM widget)
-        # is what lets ANY frontend render the selector natively — including the
-        # experimental mobile frontend, which never runs our JS. Frontends re-fetch
-        # /object_info on reload, so newly saved presets appear after a refresh.
+        """Declare the node's widgets.
+
+        `preset` is a real COMBO widget rather than a JS-only DOM widget so that
+        frontends which never run web/preset_loader.js — the experimental mobile
+        frontend in particular — can still render and use the selector. The
+        desktop canvas hides it and drives the richer DOM UI instead.
+
+        Choices are built here, at object_info time, so a frontend picks up newly
+        saved presets on reload. Parts/ entries are excluded: they are fragments
+        meant for composition, not prompts to select on their own.
+        """
+        try:
+            presets = read_presets()
+        except PresetStorageError:
+            # A broken library must not stop the node from loading; an empty
+            # dropdown is recoverable, an exception here is not.
+            LOGGER.exception("Could not build preset choices")
+            presets = {}
         preset_choices = [cls.NONE_CHOICE] + [
-            key for key in load_presets() if not key.startswith("Parts/")
+            key for key in presets if not key.startswith("Parts/")
         ]
-        # NOTE: widget order matters. ComfyUI serializes widget values as a
-        # POSITIONAL array (widgets_values) with no keys, and restores them by
-        # position on load. `text` MUST stay first so workflows saved before the
-        # `preset` widget existed keep mapping their text to position 0. New
-        # widgets always go at the END to preserve backward compatibility.
+        # WIDGET ORDER IS LOAD-BEARING. ComfyUI serialises widget values into
+        # `widgets_values`, a positional array with no keys, and restores them by
+        # position. `text` must stay first so workflows saved before `preset`
+        # existed still map their text to index 0. Any new widget goes at the END.
         return {
             "required": {
                 "text": ("STRING", {
-                    "multiline":   True,
-                    "default":     "",
+                    "multiline": True,
+                    "default": "",
                     "placeholder": "Load a preset or type freely...",
                 }),
                 "preset": (preset_choices, {
                     "default": cls.NONE_CHOICE,
-                    "tooltip": "Pick a preset. Used only when the text box is empty — anything typed in the text box overrides it.",
+                    "tooltip": (
+                        "Pick a preset. Used only when the text box is empty; "
+                        "typed text overrides it."
+                    ),
                 }),
             },
-            "hidden": {
-                "unique_id": "UNIQUE_ID",
-            }
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
-    FUNCTION     = "execute"
-    CATEGORY     = "utils/presets"
+    FUNCTION = "execute"
+    CATEGORY = "utils/presets"
 
     @classmethod
     def _resolve_output(cls, preset, text):
-        # The exact string this node outputs for the given inputs. Shared by
-        # execute() and IS_CHANGED() so the cache fingerprint tracks precisely
-        # the current prompt and nothing else.
-        #
-        # Priority: the text box wins. If you typed anything, that overrides the
-        # preset. Only when the text box is empty do we fall back to the selected
-        # preset's text. This makes the node usable on frontends that never run
-        # our JS (e.g. the mobile frontend): pick a preset and leave the box empty
-        # to use it as-is, or type in the box to override it.
-        #
-        # On desktop the DOM UI copies the chosen preset into the (editable) text
-        # box, so `text` is non-empty there and is used unchanged.
+        """The exact string this node outputs for the given inputs.
+
+        The text box wins: anything typed there overrides the selected preset.
+        Only an empty box falls back to resolving the preset, which is what makes
+        the node usable on frontends that never run our JS — pick a preset and
+        leave the box empty. The desktop DOM UI copies the resolved preset into
+        the box, so `text` is non-empty there and is used unchanged.
+
+        Shared by execute() and IS_CHANGED() so the cache fingerprint tracks the
+        prompt actually produced, and nothing else.
+        """
+        global _resolved_snapshot, _resolved_outputs
         if text and text.strip():
             return text
         if preset and preset != cls.NONE_CHOICE:
-            presets = load_presets()
-            entry = presets.get(preset)
-            if entry:
-                try:
-                    return resolve_preset(preset, presets)
-                except ValueError:
-                    return entry.get("text", "")
+            try:
+                presets = read_presets()
+                if preset in presets:
+                    # read_presets() hands back the same cached object until the
+                    # library changes on disk, so identity is a sound signal that
+                    # memoised resolutions are still valid.
+                    if presets is not _resolved_snapshot:
+                        _resolved_snapshot = presets
+                        _resolved_outputs = {}
+                    if preset not in _resolved_outputs:
+                        _resolved_outputs[preset] = resolve_preset(preset, presets)
+                    return _resolved_outputs[preset]
+            except (PresetStorageError, PresetValidationError):
+                # Fall through to `text` rather than failing the prompt: a broken
+                # or missing preset should not take a whole queued run down.
+                LOGGER.warning("Could not resolve preset %s", preset, exc_info=True)
         return text
 
     @classmethod
     def IS_CHANGED(cls, preset=None, text="", unique_id=None):
-        # ComfyUI caches a node's output keyed on its input widget values. When a
-        # preset is used as-is (empty text box, e.g. from the mobile frontend),
-        # the selected key stays the same even after the preset/composition is
-        # edited on disk, so ComfyUI would serve a stale cached result. Return a
-        # fingerprint of the resolved current prompt — the very string execute()
-        # produces — so the cache is invalidated only when that output actually
-        # changes (including edits to any referenced reusable part).
+        """Fingerprint the resolved prompt, not the widget values.
+
+        ComfyUI caches a node's output against its inputs. When a preset is used
+        as-is (empty text box) the selected key stays identical even after the
+        preset — or any part it composes — is edited elsewhere, so ComfyUI would
+        serve a stale result. Hashing the resolved output invalidates the cache
+        exactly when the produced prompt changes.
+        """
         output = cls._resolve_output(preset, text)
         return hashlib.sha256(output.encode("utf-8")).hexdigest()
 

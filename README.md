@@ -1,82 +1,81 @@
 # ComfyUI text preset loader
 
-while using comfyui I found my self switching between group of texts either for my favourite art styles or characters.
+A ComfyUI custom node for organizing, composing, and reusing text prompts with optional preview images.
 
 ## Features
-- Load text presets from JSON
-- Switch between different text presets
-- Edit and save new text presets
-- optional preview image for each preset
-- Tree structure for presets to organize them in categories and subcategories
-- search function to quickly find presets by name
-- Responsive browser library at `/preset_loader/browse`
-- Category navigation, breadcrumbs, pinned presets and recent presets
-- Live synchronization between the browser library and canvas nodes
-- Safe atomic JSON updates, rename/move, and save-copy support
-- Responsive preset editor with preview upload and draft protection
+
+- Hierarchical preset names using `/` as the category separator
+- Full-page responsive library at `/preset_loader/browse`
+- Search, category navigation, pinned presets, and recent presets
+- Reusable `Parts/` presets and composition editing
+- Live synchronization between the browser library and open canvas nodes
+- Optional normalized JPEG previews
+- Atomic, versioned persistence with a last-known-good backup
+
+## Installation
+
+Install the custom node through ComfyUI Manager or clone it into `ComfyUI/custom_nodes`, then install the dependency from `requirements.txt` and restart ComfyUI.
 
 ## Usage
-1. load Preset Loader Node from Node library
-2. in the drop-down menu choose between your text presets
-3. the text preset will be loaded in the string box and the image will be shown in the image box if it exists
-4. you can edit the text in the string box and save it as a new preset by clicking the save button and giving it a name.
-5. the new preset will be added to the drop-down menu and can be loaded like the other presets.
-6. you can also delete presets by clicking the delete button on the node.
-7. you can save preview image for the preset by clicking the save image button and selecting an image file.
 
-## Browser library
+Add **Preset Loader** from `utils/presets`. Select a prompt from the node picker; the resolved prompt appears in the read-only text area and is returned from the node. Use **Edit** to change the selected preset, **Duplicate** to create a copy, and the actions menu to manage reusable parts, pin items, delete items, or open the full library.
 
-Open `http://localhost:8188/preset_loader/browse` (replace the host and port if
-needed) to manage presets in a full-page interface. The library supports desktop
-and mobile layouts, category browsing, search, pinned and recent presets,
-preview images, rename/move, and live updates to open ComfyUI nodes.
+Open the browser library at:
 
-Preset names use `/` as a category separator, for example:
+```text
+http://localhost:8188/preset_loader/browse
+```
+
+Replace the host or port when ComfyUI is running elsewhere.
+
+Preset names use `/` as a category separator:
 
 ```text
 Characters/Heroes/example
 Camera/Portrait/close_up
+Parts/Camera/close_up
 ```
 
-## Editing behavior
-
-- **Update** overwrites the currently selected preset and is enabled only when
-  its text has changed.
-- **Save copy** creates a new preset from the current text and preserves the
-  selected preset's preview image.
-- Rename/move, pin/unpin, and delete are available from the node's actions menu.
-- Browser edits and pin changes are propagated to open nodes without reloading.
+Names are validated across operating systems. Empty path segments, traversal segments, control characters, backslashes, and reserved filesystem names are rejected.
 
 ## Preset composition
 
-In the browser editor, add existing presets under **Composition parts** to build
-a larger prompt from reusable sections. Parts can be reordered, disabled, or
-removed, and the resolved raw output is shown before saving. Wildcard syntax is
-left unchanged for downstream wildcard nodes to process.
+A preset can contain ordered text blocks and references to other presets. Parts can be reordered, disabled, or removed. Circular references and missing references are rejected before saving.
 
-Compositions store references rather than copies. Renaming a referenced preset
-updates those references; a referenced preset cannot be deleted until it is
-removed from its compositions.
+Entries under `Parts/` are treated as reusable building blocks and are hidden from the main prompt picker. Renaming a referenced preset updates its references atomically. A referenced preset cannot be deleted until it is removed from its compositions.
 
-## usage in workflow
-1. connect the output of the Preset Loader Node to the input of a Text concatenate Node.
-2. use the other input of the Text concatenate Node to add any additional text you want to include in your prompt.
-3. connect the output of the Text concatenate Node as text for CLIP text encode node.
-4. use the output of the CLIP text encode node as usual.
+## Storage and recovery
 
-## examples 
-### default usage with comfy core.
-![Default-usage_00001_.jpg](workflow/Default-usage_00001_.jpg)
+Mutable data is stored under the active ComfyUI user directory in:
 
-### advanced usage to load LoRA using [comfyui_lora_tag_loader](https://github.com/badjeff/comfyui_lora_tag_loader) by badjeff
-![LoadLoRA-usage_00001_.jpg](workflow/LoadLoRA-usage_00001_.jpg)
+```text
+text-preset-loader/
+├── presets.json
+├── presets.backup.json
+├── usage.json
+└── previews/
+```
 
-## Notes
-- tested it a little bit with nodes 2.0 seems to work. but it was designed for classic.
-- I have allergy for JS, so I am sorry if there is something not accounted for.
-- To save new preset rather than overwrite just change the name after hitting the save as button.
-- remember to use / to create categories and subcategories in the preset name.
-- the node comes with 7 presets for testing in flux, you can delete them if you want or edit them as you like.
+The bundled `data/` directory is used only to seed a new user library. Existing installations are migrated automatically. Legacy preview filenames are copied to unique opaque filenames during migration.
 
-## acknowledgements
-- Claude Sonnet 4.6 from Anthropic.
+Preset updates use atomic file replacement and retain the previous valid library as a backup. When `presets.json` is unreadable or invalid, the plugin can display the last known-good data but refuses further mutations until the primary file is repaired or restored.
+
+## Preview limits
+
+Preview uploads are bounded to 8 MB and 20 megapixels. Processing runs outside the server event loop, converts images to RGB JPEG, and limits the longest edge to 1000 pixels. Preview URLs use immutable cache headers and a version value for updates.
+
+## Workflow use
+
+Connect the node output directly to a text input or combine it with additional text before sending it to a CLIP text encode node.
+
+## Examples
+
+### Default ComfyUI workflow
+
+![Default usage](workflow/Default-usage_00001_.jpg)
+
+### LoRA tag loader workflow
+
+Uses [comfyui_lora_tag_loader](https://github.com/badjeff/comfyui_lora_tag_loader).
+
+![Load LoRA usage](workflow/LoadLoRA-usage_00001_.jpg)

@@ -1,0 +1,945 @@
+/* ============================================================================
+ * preset_ui.css — shared component styles for the node UI and the browse page.
+ *
+ * Loaded in two places: linked by browse.html, and injected into ComfyUI's
+ * document by preset_loader.js.
+ *
+ * Because half of this renders inside ComfyUI's own page, everything is
+ * namespaced `pl-` and tokens are declared on the plugin's roots rather than
+ * on :root — defining them globally would leak variables into ComfyUI and any
+ * other extension sharing the document.
+ * ========================================================================== */
+
+.pl-scope,
+.pl-dialog,
+.pl-popover {
+    --pl-surface: #17191f;
+    --pl-surface-raised: #20232b;
+    --pl-surface-sunken: #111318;
+    --pl-surface-deep: #101216;
+
+    --pl-line: #343945;
+    --pl-line-soft: #2a2e38;
+
+    --pl-text: #eef0f4;
+    --pl-text-muted: #9aa1af;
+    --pl-text-dim: #747b89;
+
+    --pl-accent: #88a8ff;
+    --pl-accent-soft: #88a8ff18;
+    --pl-accent-ink: #10131a;
+
+    --pl-danger: #ee858b;
+    --pl-danger-line: #59353a;
+    --pl-danger-surface: #24171a;
+
+    --pl-scrim: #050609b8;
+    --pl-radius: 18px;
+    --pl-radius-sm: 10px;
+    --pl-radius-xs: 8px;
+    --pl-shadow: 0 30px 100px #000c;
+    --pl-shadow-soft: 0 24px 70px #000c;
+    --pl-font: 13px/1.45 Inter, system-ui, sans-serif;
+    --pl-font-mono: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+/* --- modal dialog ------------------------------------------------------- */
+
+.pl-dialog {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--pl-scrim);
+    backdrop-filter: blur(7px);
+    /* z-index is set per instance so stacked dialogs order correctly. */
+}
+
+.pl-dialog__panel {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    max-height: 92vh;
+    overflow: hidden;
+    border: 1px solid var(--pl-line);
+    border-radius: var(--pl-radius);
+    background: var(--pl-surface);
+    color: var(--pl-text);
+    box-shadow: var(--pl-shadow);
+    font: var(--pl-font);
+}
+
+.pl-dialog--danger .pl-dialog__panel { border-color: var(--pl-danger-line); }
+.pl-dialog--danger .pl-dialog__title { color: var(--pl-danger); }
+
+.pl-dialog__header {
+    display: flex;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--pl-line-soft);
+}
+
+.pl-dialog__title { font-weight: 700; }
+
+.pl-dialog__body {
+    overflow: auto;
+    padding: 20px;
+    display: grid;
+    gap: 14px;
+}
+
+/* Opt-out for dialogs that lay out their own rows with margins. */
+.pl-dialog__body--flow { display: block; }
+
+.pl-dialog__footer {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--pl-line-soft);
+}
+
+.pl-dialog__spacer { flex: 1; }
+
+.pl-dialog__error {
+    color: var(--pl-danger);
+    font-size: 11px;
+}
+
+.pl-dialog__message { color: #c3c8d2; line-height: 1.6; }
+.pl-dialog__message strong { color: var(--pl-text); }
+.pl-dialog__detail { color: #8b919d; font-size: 11px; }
+
+/* --- anchored popover --------------------------------------------------- */
+
+.pl-popover {
+    position: fixed;
+    z-index: 10040;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+    border: 1px solid #343946;
+    border-radius: 13px;
+    background: var(--pl-surface);
+    color: var(--pl-text);
+    box-shadow: var(--pl-shadow-soft);
+    font: 12px/1.4 Inter, system-ui, sans-serif;
+}
+
+/* Menus size to their content and stack their items vertically. */
+.pl-popover--menu {
+    display: block;
+    padding: 5px;
+    font: 11px monospace;
+}
+
+/* --- controls ----------------------------------------------------------- */
+
+.pl-btn {
+    min-height: 40px;
+    padding: 0 15px;
+    border: 1px solid var(--pl-line);
+    border-radius: var(--pl-radius-sm);
+    background: var(--pl-surface-raised);
+    color: var(--pl-text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.pl-btn:hover { border-color: #3f4759; }
+.pl-btn:disabled { opacity: .55; cursor: default; }
+
+.pl-btn--primary {
+    background: var(--pl-accent);
+    border-color: var(--pl-accent);
+    color: var(--pl-accent-ink);
+    font-weight: 700;
+}
+
+.pl-btn--danger {
+    border-color: var(--pl-danger-line);
+    background: var(--pl-danger-surface);
+    color: var(--pl-danger);
+}
+
+/* Accent-tinted rather than filled: for a secondary action that should read as
+ * available without competing with the dialog's primary button. */
+.pl-btn--accent {
+    border-color: var(--pl-accent);
+    background: var(--pl-accent-soft);
+    color: #a9bcff;
+    font-weight: 650;
+}
+
+.pl-btn--accent:hover { background: #88a8ff28; }
+
+.pl-btn--icon {
+    width: 36px;
+    height: 36px;
+    min-height: 0;
+    padding: 0;
+    display: grid;
+    place-items: center;
+}
+
+.pl-btn--close { margin-left: auto; }
+
+.pl-btn--sm {
+    width: 30px;
+    height: 30px;
+    border-radius: var(--pl-radius-xs);
+}
+
+/* --- parts list --------------------------------------------------------- */
+
+.pl-part {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 9px;
+    padding: 9px 10px;
+    border: 1px solid var(--pl-line-soft);
+    border-radius: 11px;
+    background: #13151a;
+    transition: border-color .14s, transform .14s;
+}
+
+.pl-part--off { opacity: .5; }
+
+.pl-part__actions {
+    display: flex;
+    gap: 4px;
+}
+
+/* Padding rather than a bigger icon: the grip stays visually small while the
+ * hit area reaches a comfortable touch size. touch-action:none stops the
+ * browser claiming the gesture as a scroll before the drag starts — without it
+ * dragging is impossible on a phone, which is now the only way to reorder. */
+.pl-drag-handle {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    margin: -4px 0 0 -6px;
+    color: #747c8c;
+    cursor: grab;
+    line-height: 1;
+    user-select: none;
+    touch-action: none;
+}
+
+.pl-drag-handle:active { cursor: grabbing; }
+.pl-drag-handle:hover { color: var(--pl-text-muted); }
+
+/* The floating clone that follows the pointer. Declared after .pl-part so it
+ * overrides the row styling it was cloned from. */
+.pl-drag-ghost {
+    position: fixed;
+    z-index: 10050;
+    box-sizing: border-box;
+    overflow: hidden;
+    opacity: .97;
+    transform: none;
+    transition: box-shadow .12s;
+    border-color: var(--pl-accent);
+    box-shadow: 0 26px 70px #000d, 0 0 0 1px #88a8ff66;
+    pointer-events: none;
+}
+
+/* The gap the dragged row leaves behind, marking the current drop target. */
+.pl-drag-placeholder {
+    box-sizing: border-box;
+    border: 1px dashed #88a8ff88;
+    border-radius: 11px;
+    background: #88a8ff0a;
+    transition: height .16s;
+}
+
+.pl-field {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 11px 12px;
+    border: 1px solid var(--pl-line);
+    border-radius: var(--pl-radius-sm);
+    background: var(--pl-surface-sunken);
+    color: var(--pl-text);
+    font: inherit;
+    outline: none;
+}
+
+.pl-field:focus { border-color: var(--pl-accent); }
+
+/* Prompt text is edited as code: monospace, and resizable because blocks vary
+ * from one line to dozens. */
+textarea.pl-field--code {
+    display: block;
+    min-height: 240px;
+    resize: vertical;
+    padding: 12px;
+    font: var(--pl-font-mono);
+}
+
+.pl-label {
+    display: block;
+    margin: 0 0 6px;
+    color: var(--pl-text-muted);
+    font-size: 12px;
+}
+
+.pl-hint {
+    color: var(--pl-text-dim);
+    font-size: 11px;
+}
+
+/* Label + control + hint. The gap owns the spacing, so nothing inside needs a
+ * margin — a negative one here would slide the hint under the control, which
+ * paints above it once the suggestion wrapper makes it a positioned element. */
+.pl-field-group {
+    display: grid;
+    gap: 6px;
+}
+
+.pl-field-group > .pl-label { margin: 0; }
+
+/* Anchors the category suggestion list to the input it belongs to. */
+.pl-suggest-wrap { position: relative; }
+
+.pl-suggest {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 5;
+    max-height: 168px;
+    overflow: auto;
+    background: var(--pl-surface-deep);
+    border: 1px solid var(--pl-line);
+    border-radius: var(--pl-radius-sm);
+    box-shadow: 0 16px 40px #000a;
+}
+
+.pl-suggest__item {
+    display: block;
+    width: 100%;
+    padding: 8px 11px;
+    border: 0;
+    background: transparent;
+    color: #cbd0dc;
+    text-align: left;
+    font: 12px inherit;
+    cursor: pointer;
+}
+
+.pl-suggest__item:hover { background: var(--pl-surface-raised); }
+
+/* --- preset picker ------------------------------------------------------ */
+
+.pl-picker__header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    border-bottom: 1px solid #292d37;
+}
+
+.pl-picker__search {
+    min-width: 0;
+    flex: 1;
+    height: 40px;
+    padding: 0 11px;
+    border: 1px solid #384052;
+    border-radius: 9px;
+    background: var(--pl-surface-deep);
+    color: var(--pl-text);
+    font: inherit;
+    outline: none;
+}
+
+.pl-picker__search:focus { border-color: var(--pl-accent); }
+
+.pl-picker__main {
+    display: grid;
+    grid-template-columns: 165px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+}
+
+.pl-picker__nav {
+    padding: 8px;
+    border-right: 1px solid #292d37;
+    overflow: auto;
+    background: #14161b;
+}
+
+.pl-picker__nav-title {
+    padding: 5px 8px 8px;
+    color: #737a88;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+}
+
+.pl-picker__content {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+}
+
+.pl-picker__crumbs {
+    min-height: 39px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 8px 11px;
+    border-bottom: 1px solid #292d37;
+    color: #858b99;
+    font-size: 10px;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.pl-picker__results {
+    min-height: 0;
+    overflow: auto;
+    padding: 7px;
+}
+
+/* Category depth drives the indent, passed in as --pl-depth. */
+.pl-nav-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 8px 8px calc(8px + var(--pl-depth, 0) * 12px);
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #a9aebb;
+    text-align: left;
+    font: 11px inherit;
+    cursor: pointer;
+}
+
+.pl-nav-item:hover { background: #1e222b; }
+.pl-nav-item--active { background: #88a8ff1c; color: #a9beff; }
+
+.pl-nav-item__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pl-nav-item__badge {
+    margin-left: auto;
+    color: #6f7583;
+    font-size: 9px;
+}
+
+.pl-crumb {
+    padding: 2px;
+    border: 0;
+    background: transparent;
+    color: #a9beff;
+    cursor: pointer;
+    font: inherit;
+}
+
+.pl-crumb-sep { color: #555d6b; }
+
+.pl-result {
+    width: 100%;
+    display: grid;
+    gap: 3px;
+    padding: 9px 10px;
+    margin-bottom: 3px;
+    border: 1px solid transparent;
+    border-radius: var(--pl-radius-xs);
+    background: transparent;
+    color: #e4e7ed;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+}
+
+.pl-result:hover { background: #1e222b; }
+.pl-result--current { border-color: #88a8ff55; background: #88a8ff14; }
+
+.pl-result__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.pl-result__path {
+    display: flex;
+    gap: 4px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 9px;
+}
+
+.pl-empty {
+    padding: 28px;
+    color: #737a88;
+    text-align: center;
+}
+
+/* --- parts editor ------------------------------------------------------- */
+
+.pl-parts {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+}
+
+.pl-parts__picker {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+}
+
+/* One column per row below 600px: the search field and the add button cannot
+ * both stay usable side by side at phone widths. */
+@media (max-width: 600px) {
+    .pl-parts__picker:not(.pl-parts__picker--browse) { grid-template-columns: 1fr 1fr; }
+    .pl-parts__picker:not(.pl-parts__picker--browse) > .pl-parts__search { grid-column: 1 / -1; }
+}
+
+/* Browse mode: the field is a trigger, so it keeps its row alongside the button
+ * even on narrow screens. */
+.pl-parts__picker--browse > .pl-parts__search { cursor: pointer; }
+
+.pl-parts__search {
+    min-width: 0;
+    height: 42px;
+    padding: 0 12px;
+    border: 1px solid var(--pl-line);
+    border-radius: var(--pl-radius-sm);
+    background: var(--pl-surface-sunken);
+    color: var(--pl-text);
+    font: inherit;
+    outline: none;
+}
+
+.pl-parts__search:focus { border-color: var(--pl-accent); }
+
+.pl-parts__add {
+    height: 42px;
+    padding: 0 14px;
+    border: 1px solid #3b4250;
+    border-radius: var(--pl-radius-sm);
+    background: #222630;
+    color: var(--pl-text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.pl-parts__add:hover { border-color: #4a5265; }
+
+.pl-parts__list {
+    display: grid;
+    gap: 7px;
+}
+
+.pl-parts__count {
+    color: #9198a7;
+    font-size: 11px;
+}
+
+.pl-part__content {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.pl-part__name {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.pl-part__title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #e4e7ed;
+    font-size: 12px;
+}
+
+.pl-part__note {
+    color: #747c8c;
+    font-size: 10px;
+}
+
+/* Inline label for a custom text part — an input styled as plain text so it
+ * reads as a caption until you click it. */
+.pl-part__label {
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: #9ca4b3;
+    font-size: 11px;
+    outline: none;
+}
+
+/* --- code surfaces ------------------------------------------------------ */
+
+.pl-code {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 120px;
+    resize: vertical;
+    padding: 8px;
+    border: 1px solid #2f3440;
+    border-radius: var(--pl-radius-xs);
+    background: #0f1116;
+    color: #e1e3e9;
+    outline: none;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.pl-code:focus { border-color: var(--pl-accent); }
+
+/* Read-only variant for a referenced composition's resolved output. */
+.pl-code--readonly {
+    margin: 0;
+    min-height: 0;
+    max-height: 120px;
+    overflow: auto;
+    resize: none;
+    white-space: pre-wrap;
+    color: #aeb4c0;
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.pl-resolved {
+    margin: 0;
+    min-height: 110px;
+    max-height: 220px;
+    overflow: auto;
+    padding: 12px;
+    white-space: pre-wrap;
+    color: #bdc3ce;
+    background: #101217;
+    border: 1px solid var(--pl-line-soft);
+    border-radius: 11px;
+    font: var(--pl-font-mono);
+}
+
+/* --- preview image ------------------------------------------------------ */
+
+.pl-media__box {
+    height: 180px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: #0d0f13;
+    border: 1px solid var(--pl-line-soft);
+    border-radius: 12px;
+}
+
+.pl-media__box img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.pl-media__hint {
+    color: var(--pl-text-dim);
+    font-size: 11px;
+}
+
+.pl-media__actions {
+    display: flex;
+    gap: 9px;
+    margin-top: 9px;
+}
+
+.pl-btn--md { min-height: 36px; padding: 0 13px; }
+
+/* ============================================================================
+ * Node widget.
+ *
+ * Rendered on ComfyUI's canvas rather than on the browse page, so it follows
+ * the canvas idiom — monospace, tight radii, its own palette — instead of the
+ * Inter/rounded look above. Kept in this file so both surfaces share one
+ * stylesheet and one load.
+ * ========================================================================== */
+
+.pl-node {
+    --pl-node-accent: #4a90d9;
+    --pl-node-danger: #cc4444;
+    --pl-node-line: #2e2e3c;
+    --pl-node-line-strong: #4a4a64;
+    --pl-node-img-bg: #13131a;
+    --pl-node-dim: #6a6880;
+
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+    font-family: monospace;
+}
+
+.pl-node__selector {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+
+/* background is assigned from the live ComfyUI theme at runtime. */
+.pl-node__dropdown {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border: 1px solid var(--pl-node-line);
+    border-radius: 5px;
+    background: #1e1e2a;
+    color: var(--pl-node-dim);
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.pl-node__dropdown:hover { border-color: var(--pl-node-accent); }
+
+.pl-node__label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pl-node__chevron {
+    flex-shrink: 0;
+    margin-left: 6px;
+    color: var(--pl-node-dim);
+}
+
+.pl-node__new {
+    flex: 0 0 38px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--pl-node-accent);
+    border-radius: 5px;
+    background: #4a90d924;
+    color: var(--pl-node-accent);
+    cursor: pointer;
+}
+
+.pl-node__new:hover { background: #4a90d955; color: #fff; }
+
+.pl-node__preview {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+.pl-node__preview--on { display: flex; }
+
+/* height is set inline: the user drags it and it persists per node. */
+.pl-node__imgbox {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--pl-node-img-bg);
+    border: 1px solid var(--pl-node-line);
+    border-radius: 5px;
+    box-sizing: border-box;
+}
+
+.pl-node__img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+}
+
+.pl-node__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 24px 0;
+    font-size: 8px;
+    letter-spacing: 1px;
+    color: var(--pl-node-dim);
+}
+
+.pl-node__empty-icon { opacity: .2; }
+
+/* Floating controls over the image. backdrop-filter keeps them legible on any
+ * preview without dimming the image itself. */
+.pl-node__img-btn {
+    position: absolute;
+    bottom: 8px;
+    z-index: 1;
+    padding: 3px 7px;
+    border: 1px solid var(--pl-node-line-strong);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, .65);
+    color: #9895b0;
+    font-family: monospace;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+}
+
+.pl-node__img-btn--set { right: 8px; }
+.pl-node__img-btn--set:hover { border-color: var(--pl-node-accent); color: var(--pl-node-accent); }
+
+.pl-node__img-btn--clear {
+    left: 8px;
+    border-color: #cc444466;
+    color: #c98a8a;
+}
+
+.pl-node__img-btn--clear:hover { border-color: var(--pl-node-danger); color: #fff; }
+
+.pl-node__resize {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 48px;
+    height: 14px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    background: rgba(0, 0, 0, .35);
+    color: var(--pl-node-dim);
+    cursor: ns-resize;
+    backdrop-filter: blur(2px);
+}
+
+.pl-node__resize:hover { color: var(--pl-node-accent); }
+
+.pl-node__actions {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+.pl-node__btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--pl-node-line-strong);
+    border-radius: 5px;
+    background: transparent;
+    color: #b7bac5;
+    font-family: monospace;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+    cursor: pointer;
+}
+
+.pl-node__btn:hover { border-color: var(--pl-node-accent); background: #252a34; color: #fff; }
+
+.pl-node__btn--primary {
+    border-color: var(--pl-node-accent);
+    background: #4a90d924;
+    color: var(--pl-node-accent);
+}
+
+.pl-node__btn--primary:hover { background: #4a90d955; color: #fff; }
+
+.pl-node__btn--icon {
+    flex: 0 0 44px;
+    display: grid;
+    place-items: center;
+    color: #a7abb7;
+}
+
+.pl-node__btn:disabled {
+    opacity: .42;
+    cursor: default;
+}
+
+.pl-node__btn:disabled:hover {
+    border-color: var(--pl-node-line-strong);
+    background: transparent;
+    color: #b7bac5;
+}
+
+/* Marks in the selected-preset label. */
+.pl-node__pin {
+    display: inline-flex;
+    margin-right: 5px;
+    color: #ef88a7;
+    vertical-align: middle;
+}
+
+.pl-node__sep { color: #59606d; margin: 0 3px; }
+
+.pl-node__badge {
+    display: inline-flex;
+    margin-left: 6px;
+    color: var(--pl-node-accent);
+    vertical-align: middle;
+}
+
+/* --- action menu items -------------------------------------------------- */
+
+.pl-menu__item {
+    display: block;
+    width: 100%;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #c9ccd5;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+}
+
+.pl-menu__item:hover { background: #252832; }
+.pl-menu__item--danger { color: #e78186; }
+
+.pl-menu__sep {
+    height: 1px;
+    margin: 5px;
+    background: #2d313b;
+}
