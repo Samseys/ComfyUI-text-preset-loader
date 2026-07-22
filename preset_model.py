@@ -13,7 +13,7 @@ for composition rather than a prompt to select on its own. Because a name has to
 survive being a path segment on any OS, validate_key() is stricter than the
 filesystem the library currently sits on.
 
-web/preset_model.js mirrors this file's shape rules exactly (parts, resolution,
+web/core/model.js mirrors this file's shape rules exactly (parts, resolution,
 canonicalisation). Its name-validation is a deliberately partial subset, kept
 only for inline editor feedback — this file is the authority on names.
 """
