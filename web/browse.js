@@ -3,9 +3,11 @@ import {
     resolvePreset,
     presetKind,
     isComposition,
+    validateKey,
 } from "./core/model.js";
 import { openPresetEditor, openPartCreator } from "./ui/editor.js";
 import { openPresetPicker } from "./ui/picker.js";
+import { promptDialog } from "./ui/dialog.js";
 import { iconSvg, pathTone } from "./ui/icons.js";
 import { presetApi } from "./core/api.js";
 import { loadPresets, subscribePresets } from "./core/store.js";
@@ -261,6 +263,7 @@ function presetCard(row) {
 
     const actions = element("div", "actions");
     const copy = element("button", "button", "Copy");
+    const dup = element("button", "button", "Duplicate");
     const edit = element("button", "button", "Edit");
     copy.onclick = async () => {
         try {
@@ -271,8 +274,22 @@ function presetCard(row) {
             notify(error.message);
         }
     };
+    dup.onclick = () => promptDialog({
+        title: "Duplicate preset",
+        value: `${row.key} copy`,
+        confirmLabel: "Duplicate",
+        // Throwing surfaces the message on the dialog and keeps it open with
+        // the typed name intact, so the user can correct it.
+        onConfirm: async newKey => {
+            const key = validateKey(newKey);
+            if (presets[key]) throw new Error("A preset with that name already exists");
+            await presetApi.duplicate(row.key, key);
+            await reload();
+            notify("Preset duplicated");
+        },
+    });
     edit.onclick = () => openEditor(row.key);
-    actions.append(copy, edit);
+    actions.append(copy, dup, edit);
     body.append(actions);
     card.append(pin, preview, body);
     return card;
